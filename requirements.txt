@@ -1,0 +1,5 @@
+psycopg[binary]==3.2.*
+pymongo==4.*
+redis==5.*
+neo4j==5.*
+cassandra-driver>=3.29

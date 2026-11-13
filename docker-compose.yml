@@ -1,0 +1,36 @@
+# Les 5 moteurs du TP. Socle : docker compose up -d
+# Moteur colonne (Cassandra, ~1 Go de RAM) : docker compose --profile colonne up -d
+# Mémoire à allouer à Docker Desktop : 5 Go. Arrêt + suppression des données : docker compose --profile colonne down -v
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: tp
+      POSTGRES_PASSWORD: tp
+      POSTGRES_DB: discord
+    ports: ["5432:5432"]
+    volumes:
+      - ./data:/data:ro   # les CSV sont visibles dans le conteneur sous /data
+
+  mongo:
+    image: mongo:7
+    ports: ["27017:27017"]
+
+  redis:
+    image: redis:7
+    ports: ["6379:6379"]
+
+  neo4j:
+    image: neo4j:5
+    environment:
+      NEO4J_AUTH: neo4j/tpynov2026
+      NEO4J_server_memory_heap_max__size: 768M
+    ports: ["7474:7474", "7687:7687"]
+
+  cassandra:
+    image: cassandra:4.1
+    profiles: ["colonne"]
+    environment:
+      MAX_HEAP_SIZE: 512M
+      HEAP_NEWSIZE: 128M
+    ports: ["9042:9042"]
