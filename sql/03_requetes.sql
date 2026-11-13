@@ -172,7 +172,7 @@ SELECT nb_membres AS apres_suppression,
 FROM app.serveur WHERE id = 118;
 ROLLBACK;
 
-\echo === DENORMALISATION 1 : vue materialisee d'activite quotidienne ===
+\echo === DENORMALISATION 1 : vue materialisee dactivite quotidienne ===
 -- Precalculer messages + auteurs distincts par serveur et par jour UTC.
 -- On garde toute la periode pour reutiliser la vue au-dela d'octobre.
 CREATE MATERIALIZED VIEW IF NOT EXISTS app.activite_serveur_jour AS
@@ -237,8 +237,8 @@ WHERE s.nb_membres <> (
     SELECT COUNT(*) FROM app.membre AS m WHERE m.serveur_id = s.id
 );
 
-\echo === INFORMATION : la vue n'est PAS actualisee automatiquement apres chaque message ===
+\echo === INFORMATION : la vue nest PAS actualisee automatiquement apres chaque message ===
 \echo Actualisation apres des ecritures :
 \echo REFRESH MATERIALIZED VIEW CONCURRENTLY app.activite_serveur_jour;
-\echo Le refresh concurrent exige l'index UNIQUE ci-dessus, evite de bloquer les lectures ordinaires,
+\echo Le refresh concurrent exige lindex UNIQUE ci-dessus, evite de bloquer les lectures ordinaires,
 \echo mais coute un recalcul complet. Le declenchement doit etre decide (tache planifiee, par exemple).
