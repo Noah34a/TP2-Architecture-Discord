@@ -14,9 +14,10 @@ from common import bucket_de, cassandra_session, mongo_db, neo_driver, pg_conn, 
 pg, mdb, rds, neo = pg_conn(), mongo_db(), redis_conn(), neo_driver()
 cs = cassandra_session("discord")
 SELECT_CS = cs.prepare("SELECT message_id FROM messages_par_salon WHERE salon_id = ? AND bucket = ? LIMIT ?")
+SELECT_FENETRES = cs.prepare("SELECT bucket FROM fenetres_par_salon WHERE salon_id = ?")
 NEO = neo.session()
 
-SALON_CHAUD, SALON_MOYEN, SALON_CLAIRSEME = 775, 424, 340   # 12 952 / 90 / 2 messages
+SALON_CHAUD, SALON_MOYEN, SALON_CLAIRSEME = 775, 522, 342   # 12 952 / 97 / 1 messages, Mesure 0
 DERNIER_BUCKET = bucket_de(pg.execute("SELECT max(id) FROM app.message").fetchone()[0])
 CREATION = {s: bucket_de(int(c.timestamp() * 1000 - 1420070400000) << 22)
             for s, c in pg.execute("SELECT id, cree_le FROM app.salon").fetchall()}
@@ -31,13 +32,40 @@ def b1_pg(salon):
 
 
 def b1_mongo(salon):
-    raise NotImplementedError("À FAIRE — Mongo : find + sort + limit")
+    """Index compose MongoDB : (salon_id, _id DESC)."""
+    cursor = mdb.messages.find(
+        {"salon_id": salon}, {"_id": 1}
+    ).sort("_id", -1).limit(50)
+    return [int(doc["_id"]) for doc in cursor]
+
+
+def lire_cs(salon, buckets):
+    """Lire 50 IDs par ordre de Snowflake decroissant ; suivi des partitions visitees."""
+    ids, visites = [], 0
+    for b in buckets:
+        visites += 1
+        restant = 50 - len(ids)
+        # CQL trie deja les messages de chaque fenetre par message_id DESC.
+        ids.extend(row.message_id for row in cs.execute(SELECT_CS, (salon, b, restant)))
+        if len(ids) >= 50:
+            break
+    return ids, visites
+
 
 def b1_cassandra(salon):
-    raise NotImplementedError("À FAIRE — parcourir les fenêtres de 10 jours, du plus récent au plus ancien")
+    """Version naive : lit aussi les fenetres vides, du plus recent au plus ancien."""
+    return lire_cs(salon, range(DERNIER_BUCKET, CREATION[salon] - 1, -1))[0]
+
 
 def b1_cassandra_fenetres(salon):
-    raise NotImplementedError("À FAIRE (mission 3, optionnel) — votre correctif aux lectures de fenêtres vides")
+    """Correctif facultatif : lire seulement les fenetres connues non vides.
+
+    Le prix du correctif est une table supplementaire a alimenter lors de
+    la migration ou des futures ecritures, plus une requete de metadonnees.
+    """
+    buckets = (r.bucket for r in cs.execute(SELECT_FENETRES, (salon,)))
+    return lire_cs(salon, buckets)[0]
+
 
 
 # ---------- B2. Présence : battement de cœur (écriture) et « combien sont en ligne dans ce serveur ? » (lecture) ----------
@@ -102,12 +130,29 @@ def chrono(f, entrees, echauffement=10):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--n", type=int, default=300)
-    n = ap.parse_args().n
+    ap.add_argument("--mission3", action="store_true", help="Benchmark B1 seulement (mission 3)")
+    args = ap.parse_args()
+    n = args.n
     rnd = random.Random(1)
 
     # ---- Contrôles de cohérence AVANT tout chronométrage (Question 5.2 : à compléter pour chaque cas implémenté) ----
-    # Exemple : assert b1_pg(SALON_CHAUD) == b1_mongo(SALON_CHAUD) == b1_cassandra(SALON_CHAUD)
-    # À FAIRE : B2, B3, B3 bis, B4.
+    # Mesure 5b : comparer effectivement les 50 memes Snowflakes, dans le meme ordre.
+    for nom, salon in (("chaud", SALON_CHAUD), ("moyen", SALON_MOYEN), ("clairseme", SALON_CLAIRSEME)):
+        ids_pg = b1_pg(salon)
+        ids_mongo = b1_mongo(salon)
+        ids_cs, visites = lire_cs(salon, range(DERNIER_BUCKET, CREATION[salon] - 1, -1))
+        ids_opt = b1_cassandra_fenetres(salon)
+        assert ids_pg == ids_mongo == ids_cs == ids_opt, (
+            f"MESURE 5b ECHEC : salon {salon} : "
+            f"PostgreSQL={len(ids_pg)}, MongoDB={len(ids_mongo)}, "
+            f"Cassandra={len(ids_cs)}, Cassandra opt={len(ids_opt)}"
+        )
+        buckets_opti = (r.bucket for r in cs.execute(SELECT_FENETRES, (salon,)))
+        _, visites_opti = lire_cs(salon, buckets_opti)
+        print(f"MESURE 5b OK | salon {nom} ({salon}) | "
+              f"{len(ids_pg)} IDs identiques et ordonnes | "
+              f"fenetres Cassandra : {visites} naive / {visites_opti} optimisees")
+    # Les asserts des cas B2 / B3 / B4 seront completes pour les missions 5 et 6.
 
     lignes = []
 
@@ -124,7 +169,11 @@ def main():
         mesure(cas, "PostgreSQL", b1_pg, e)
         mesure(cas, "MongoDB", b1_mongo, e)
         mesure(cas, "Cassandra", b1_cassandra, e)
-        mesure(cas, "Cassandra + votre correctif (optionnel)", b1_cassandra_fenetres, e)
+        mesure(cas, "Cassandra + fenetres non vides (bonus)", b1_cassandra_fenetres, e)
+    if args.mission3:
+        print(f"| Cas | Moteur | p50 (ms) | p95 (ms) |   (n = {n})\n|---|---|---:|---:|")
+        print("\n".join(lignes))
+        return
     e = [(rnd.randint(1, NB_UTILISATEURS),) for _ in range(n)]
     mesure("B2a présence : écriture", "PostgreSQL", b2w_pg, e)
     mesure("B2a présence : écriture", "Redis", b2w_redis, e)

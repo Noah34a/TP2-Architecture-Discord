@@ -68,29 +68,39 @@ Huit violations ont été refusées lors des tests : pseudo en double ; e-mail s
 
 ## Mesure 2 — Latence des requêtes critiques
 
-Exécuter `sql/03_requetes.sql` avec `\timing on` et relever les temps réellement affichés.
+Exécution locale de `sql/03_requetes.sql` avec `\timing on` le 13 novembre 2026. Mesures relevées sur le second passage, après correction des lignes `\echo`. Ce sont des temps de requête, non des p50/p95.
 
 | Requête | Périmètre | Durée relevée (ms) |
 |---|---|---:|
-| R1 | 50 derniers messages, salon chaud 775 | À relever |
-| R1 | 50 derniers messages, salon moyen 522 | À relever |
-| R1 | 50 derniers messages, salon clairsemé 342 | À relever |
-| R2 | Droit d'écriture, membre du salon 775 | À relever |
-| R3 | Activité par jour, serveur 118, octobre 2026 | À relever |
+| R1 | 50 derniers messages, salon chaud 775 | 0,936 |
+| R1 | 50 derniers messages, salon moyen 522 | 0,396 |
+| R1 | 50 derniers messages, salon clairsemé 342 | 0,179 |
+| R2 | Droit d'écriture, membre du salon 775 | 0,292 |
+| R3 | Activité par jour, serveur 118, octobre 2026 | 7,831 |
 
 R1 pagine par `id < curseur_id` et non par `OFFSET`. R2 vérifie que le salon est textuel et que l'utilisateur est membre du serveur. R3 compte les messages et les auteurs distincts par jour en UTC.
 
 ## Mesure 3 — Plan d'exécution de R3
 
-Sortie de `EXPLAIN (ANALYZE, BUFFERS)` à insérer :
+Extrait du plan réel, second passage :
 
 ```text
-À coller depuis mission2_resultats.txt.
+GroupAggregate (actual time=3.6..3.8 rows=31 loops=1)
+  -> Sort (rows=1928)
+       -> Nested Loop (rows=1928)
+            -> Index Scan using salon_pkey on salon s (rows=4)
+            -> Bitmap Heap Scan on message m (rows=482 loops=4)
+                 Recheck Cond: (salon_id = s.id)
+                 Filter: (envoye_le >= 2026-10-01 AND envoye_le < 2026-11-01)
+                 Rows Removed by Filter: 4377
+                 Buffers: shared hit=5633
+                 -> Bitmap Index Scan on idx_message_salon_id_desc
+Execution Time: 3.785 ms
 ```
 
-- Nœud le plus coûteux : à identifier dans le plan réel.
-- Parcours séquentiel ou indexé : à relever dans le plan réel (ne pas le deviner).
-- Explication à vérifier : l'index `(salon_id, id DESC)` aide à cibler des salons et à trier les messages par Snowflake, mais il ne porte pas directement sur `envoye_le` pour filtrer l'intervalle d'octobre. Le moteur peut donc devoir filtrer des lignes supplémentaires selon le plan choisi.
+- Le point coûteux dans l'accès aux messages est le **Bitmap Heap Scan** répété quatre fois ; il se trouve sous un **Nested Loop**. Le regroupement et le tri ajoutent aussi du travail.
+- Il s'agit d'un **parcours indexé**, pas d'un parcours séquentiel complet : le moteur sélectionne les salons via l'index et retrouve leurs messages avec `idx_message_salon_id_desc`.
+- Mais cet index ne contient pas `envoye_le` comme colonne de filtre. PostgreSQL doit relire et éliminer les messages hors octobre, d'où `Rows Removed by Filter`. Les temps `EXPLAIN` et `\timing` sont différents car ils ne mesurent pas exactement la même chose.
 
 ## Mesure 4 — Dénormalisations
 
@@ -98,10 +108,10 @@ Sortie de `EXPLAIN (ANALYZE, BUFFERS)` à insérer :
 
 | Version de R3 | Durée relevée (ms) |
 |---|---:|
-| Requête sur tables normalisées | À relever |
-| Lecture de la vue matérialisée | À relever |
+| Requête sur tables normalisées | 7,831 |
+| Lecture de la vue matérialisée | 0,136 |
 
-- Vérification : `nb_lignes_differentes` doit être **0**.
+- Vérification observée : `nb_lignes_differentes = 0`. Sur ce second passage, la lecture de la vue a été environ **57,6 fois plus rapide** que la requête normalisée (7,831 / 0,136), sur ce poste uniquement.
 - **Gain attendu en lecture** : lecture de résultats par serveur et jour déjà agrégés, au lieu de calculer `COUNT(DISTINCT)` sur les messages.
 - **Coût payé** : stockage supplémentaire, création et rafraîchissement de la vue (recalcul depuis les messages).
 - **Risque** : données périmées si un message est ajouté, modifié ou supprimé avant le prochain rafraîchissement.
@@ -111,9 +121,9 @@ Sortie de `EXPLAIN (ANALYZE, BUFFERS)` à insérer :
 
 | Étape de preuve | Valeur | Résultat attendu |
 |---|---:|---|
-| Avant insertion | À relever | Nombre initial |
-| Après insertion | À relever | Initial + 1 ; `test_ok = t` |
-| Après suppression | À relever | Initial ; `test_ok = t` |
+| Avant insertion | 478 | Nombre initial |
+| Après insertion | 479 | Initial + 1 ; `test_ok = t` |
+| Après suppression | 478 | Initial ; `test_ok = t` |
 
 - **Gain en lecture** : `SELECT nb_membres` sans recalculer `COUNT(*)` sur la table des membres.
 - **Coût payé** : une mise à jour du serveur à chaque insertion ou suppression de membre.
@@ -121,6 +131,23 @@ Sortie de `EXPLAIN (ANALYZE, BUFFERS)` à insérer :
 - **Garde-fou** : trigger atomique dans la même transaction et vérification périodique par comparaison avec un `COUNT(*)` réel (`compteurs_incorrects` doit être **0**).
 - **Choix** : incrémenter/décrémenter évite le coût d'un recomptage de tous les membres ; si l'on déplace un membre par `UPDATE serveur_id`, décrémenter l'ancien serveur et incrémenter le nouveau. Les autres mises à jour ne changent pas le compteur.
 
-## Mesures 5 à 8 — À réaliser aux missions 3 à 6
+## Mesure 5 — Vérification de la migration (mission 3)
 
-Ne pas remplir les durées avant exécution réelle de MongoDB, Cassandra, Redis, Neo4j et des benchmarks finaux.
+À remplir avec la sortie de `bench/load_nosql.py --messages-seulement` et `bench/bench.py --mission3 --n 100`.
+
+| Contrôle | PostgreSQL | MongoDB | Cassandra |
+|---|---:|---:|---:|
+| Nombre total de messages (5a) | 300 000 | À relever | À relever |
+| IDs identiques salon 775 (5b) | 50 attendus | À tester | À tester |
+| IDs identiques salon 522 (5b) | 50 attendus | À tester | À tester |
+| IDs identiques salon 342 (5b) | 1 attendu | À tester | À tester |
+
+Pour Cassandra, vérifier l'égalité des comptages par les insertions acquittées et, surtout, par une lecture de chaque partition non vide connue depuis PostgreSQL : ne pas utiliser `SELECT count(*)` global en production.
+
+## Mesure 6 — p50 et p95 des 50 derniers messages (mission 3)
+
+Coller ici le tableau produit par `python bench.py --mission3 --n 100`. Les mesures réelles seront obtenues sur le Mac, sans données simulées.
+
+## Mesures 7 et 8 — À réaliser aux missions 5 et 6
+
+Conserver les résultats bruts des benchmarks et le modèle de machine pour le rendu.
