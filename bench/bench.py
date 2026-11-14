@@ -166,13 +166,74 @@ def b3bis_neo(uid):
 
 # ---------- B4. Activité d'un serveur : messages et auteurs distincts par jour, octobre 2026 ----------
 def b4_pg_normalise(serveur):
-    raise NotImplementedError("À FAIRE — SQL")
+    """Activite d'octobre 2026 en UTC, calcul SQL sans denormalisation."""
+    rows = pg.execute("""
+        SELECT (m.envoye_le AT TIME ZONE 'UTC')::date AS jour,
+               COUNT(*) AS nb_messages,
+               COUNT(DISTINCT m.auteur_id) AS nb_auteurs
+        FROM app.message AS m
+        JOIN app.salon AS s ON s.id = m.salon_id
+        WHERE s.serveur_id = %s
+          AND m.envoye_le >= TIMESTAMPTZ '2026-10-01 00:00:00+00'
+          AND m.envoye_le <  TIMESTAMPTZ '2026-11-01 00:00:00+00'
+        GROUP BY (m.envoye_le AT TIME ZONE 'UTC')::date
+        ORDER BY jour
+    """, (serveur,)).fetchall()
+    return [(str(jour), int(messages), int(auteurs))
+            for jour, messages, auteurs in rows]
 
 def b4_pg_vue(serveur):
-    raise NotImplementedError("À FAIRE — lire la vue matérialisée")
+    """Meme activite, pre-agregee dans la vue materialisee Mission 2."""
+    rows = pg.execute("""
+        SELECT jour, nb_messages, nb_auteurs
+        FROM app.activite_serveur_jour
+        WHERE serveur_id = %s
+          AND jour >= DATE '2026-10-01'
+          AND jour <  DATE '2026-11-01'
+        ORDER BY jour
+    """, (serveur,)).fetchall()
+    return [(str(jour), int(messages), int(auteurs))
+            for jour, messages, auteurs in rows]
 
 def b4_mongo(serveur):
-    raise NotImplementedError("À FAIRE — aggregate")
+    """Aggregate MongoDB : messages et auteurs distincts par jour UTC."""
+    pipeline = [
+        {"$match": {
+            "serveur_id": int(serveur),
+            "envoye_le": {
+                "$gte": datetime(2026, 10, 1, tzinfo=timezone.utc),
+                "$lt": datetime(2026, 11, 1, tzinfo=timezone.utc),
+            },
+        }},
+        {"$group": {
+            "_id": {"$dateToString": {
+                "format": "%Y-%m-%d", "date": "$envoye_le", "timezone": "UTC",
+            }},
+            "nb_messages": {"$sum": 1},
+            "auteurs": {"$addToSet": "$auteur_id"},
+        }},
+        {"$project": {
+            "nb_messages": 1,
+            "nb_auteurs": {"$size": "$auteurs"},
+        }},
+        {"$sort": {"_id": 1}},
+    ]
+    return [(row["_id"], int(row["nb_messages"]), int(row["nb_auteurs"]))
+            for row in mdb.messages.aggregate(pipeline)]
+
+
+def verifier_b4():
+    """Interdit les comparaisons de latence si les moteurs divergent."""
+    a = b4_pg_normalise(SERVEUR_TEST)
+    b = b4_pg_vue(SERVEUR_TEST)
+    c = b4_mongo(SERVEUR_TEST)
+    assert a == b == c, (
+        f"B4 incoherent sur le serveur {SERVEUR_TEST} : "
+        f"PostgreSQL={a[:3]}...; vue={b[:3]}...; MongoDB={c[:3]}..."
+    )
+    print(f"MESURE 8 OK | B4 serveur {SERVEUR_TEST} | "
+          f"{len(a)} jours, {sum(r[1] for r in a)} messages | "
+          "PostgreSQL normalise = vue materialisee = MongoDB")
 
 def chrono(f, entrees, echauffement=10):
     for e in entrees[:echauffement]:
@@ -271,6 +332,8 @@ def main():
 
     if not args.mission5:
         initialiser_cassandra()
+        if not args.mission3:
+            verifier_b4()
         for nom, salon in (("chaud", SALON_CHAUD), ("moyen", SALON_MOYEN), ("clairseme", SALON_CLAIRSEME)):
             ids_pg = b1_pg(salon)
             ids_mongo = b1_mongo(salon)

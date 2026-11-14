@@ -2,13 +2,13 @@
 
 Bachelor 3 Ynov Montpellier — Architecture des données, plateforme miniature de discussion.
 
-**Règle :** les volumes sont contrôlés sur le poste de travail ; les temps de latence ci-dessous ne doivent pas être inventés. Ajouter les sorties du Terminal lors de l'exécution.
+**Méthode :** les volumes et les latences ci-dessous proviennent des sorties du Terminal réalisées sur le Mac du TP. Les performances sont celles de ce jeu de données local, pas de Discord en production.
 
 ## Machine
 
-- Machine : MacBook Pro (modèle de processeur et mémoire totale à préciser).
-- Système : macOS (version à préciser).
-- Docker Desktop : utilisé avec PostgreSQL 16, MongoDB 7, Redis 7, Neo4j 5 ; Cassandra 4.1 sera lancé à la mission 3.
+- Machine : MacBook Pro — puce **Apple M5**, **10 cœurs** (4 performance + 6 efficacité), **16 Go RAM**.
+- Système : **macOS 26.6.2** (build 25G83).
+- Docker Desktop / Docker Compose : **PostgreSQL 16, MongoDB 7, Redis 7, Neo4j 5, Cassandra 4.1** (profil `colonne` pour Cassandra).
 - Python : environnement virtuel `.venv`, dépendances de `requirements.txt` installées.
 
 ## Mesure 0 — État des lieux des données
@@ -131,23 +131,113 @@ Execution Time: 3.785 ms
 - **Garde-fou** : trigger atomique dans la même transaction et vérification périodique par comparaison avec un `COUNT(*)` réel (`compteurs_incorrects` doit être **0**).
 - **Choix** : incrémenter/décrémenter évite le coût d'un recomptage de tous les membres ; si l'on déplace un membre par `UPDATE serveur_id`, décrémenter l'ancien serveur et incrémenter le nouveau. Les autres mises à jour ne changent pas le compteur.
 
-## Mesure 5 — Vérification de la migration (mission 3)
+## Mesure 5 — Migration et égalité des résultats (Mission 3)
 
-À remplir avec la sortie de `bench/load_nosql.py --messages-seulement` et `bench/bench.py --mission3 --n 100`.
+**Protocole :** `python load_nosql.py --messages-seulement` depuis `bench/`, puis `python bench.py --mission3 --n 100`. Les contrôles ne se limitent pas aux accusés d'insertion : les **15 965 partitions Cassandra non vides** ont été relues et comparées à PostgreSQL.
 
 | Contrôle | PostgreSQL | MongoDB | Cassandra |
 |---|---:|---:|---:|
-| Nombre total de messages (5a) | 300 000 | À relever | À relever |
-| IDs identiques salon 775 (5b) | 50 attendus | À tester | À tester |
-| IDs identiques salon 522 (5b) | 50 attendus | À tester | À tester |
-| IDs identiques salon 342 (5b) | 1 attendu | À tester | À tester |
+| Messages après migration (5a) | **300 000** | **300 000** | **300 000** |
+| 50 derniers IDs salon chaud 775 (5b) | 50 | 50 identiques | 50 identiques |
+| 50 derniers IDs salon moyen 522 (5b) | 50 | 50 identiques | 50 identiques |
+| Derniers IDs salon clairsemé 342 (5b) | 1 | 1 identique | 1 identique |
 
-Pour Cassandra, vérifier l'égalité des comptages par les insertions acquittées et, surtout, par une lecture de chaque partition non vide connue depuis PostgreSQL : ne pas utiliser `SELECT count(*)` global en production.
+- Insertion Cassandra : **300 000 INSERT acquittés**, **15 965 partitions non vides**, et **300 000 messages relus** conformes à PostgreSQL.
+- Recherche Cassandra naïve / fenêtres non vides : salon 775 **1/1**, salon 522 **16/14**, salon 342 **26/1**. Le nombre de fenêtres explorées explique la pénalité sur un salon presque vide.
+- MongoDB utilise un index composé sur `(salon_id, _id DESC)` ; Cassandra partitionne par `(salon_id, bucket de 10 jours)` avec tri décroissant de l'identifiant Snowflake. La table supplémentaire de fenêtres non vides est une **dénormalisation** avec coût de maintenance.
 
-## Mesure 6 — p50 et p95 des 50 derniers messages (mission 3)
+## Mesure 6 — B1 : latence p50 / p95, 100 exécutions
 
-Coller ici le tableau produit par `python bench.py --mission3 --n 100`. Les mesures réelles seront obtenues sur le Mac, sans données simulées.
+Résultats du premier benchmark `python bench.py --mission3 --n 100`, latences **du script Python (client + requête)** sur ce poste :
 
-## Mesures 7 et 8 — À réaliser aux missions 5 et 6
+| Cas | Moteur | p50 (ms) | p95 (ms) |
+|---|---|---:|---:|
+| B1 50 derniers messages, salon chaud | PostgreSQL | 0.16 | 0.20 |
+| B1 50 derniers messages, salon chaud | MongoDB | 0.24 | 0.30 |
+| B1 50 derniers messages, salon chaud | Cassandra | 0.57 | 1.25 |
+| B1 50 derniers messages, salon chaud | Cassandra + fenetres non vides (bonus) | 0.93 | 1.04 |
+| B1 50 derniers messages, salon moyen | PostgreSQL | 0.15 | 0.17 |
+| B1 50 derniers messages, salon moyen | MongoDB | 0.23 | 0.28 |
+| B1 50 derniers messages, salon moyen | Cassandra | 6.07 | 6.60 |
+| B1 50 derniers messages, salon moyen | Cassandra + fenetres non vides (bonus) | 8.20 | 11.99 |
+| B1 50 derniers messages, salon clairsemé | PostgreSQL | 0.14 | 0.17 |
+| B1 50 derniers messages, salon clairsemé | MongoDB | 0.22 | 0.28 |
+| B1 50 derniers messages, salon clairsemé | Cassandra | 10.86 | 19.07 |
+| B1 50 derniers messages, salon clairsemé | Cassandra + fenetres non vides (bonus) | 1.23 | 1.75 |
 
-Conserver les résultats bruts des benchmarks et le modèle de machine pour le rendu.
+**Analyse.** PostgreSQL est le plus rapide dans les trois salons. Dans le salon clairsemé, Cassandra naïf affiche p50 **10,86 ms** contre **1,23 ms** pour l'optimisation. Sur le salon moyen, cette optimisation est au contraire plus lente (**8,20 ms** contre **6,07 ms**) : elle ajoute une lecture de métadonnées qui ne se rentabilise pas systématiquement. Les tests de Mission 4 prouvent en outre le risque des tombstones ; voir `RUNBOOK_tombstones.md`.
+
+## Mesure 7 — Redis et Neo4j : cohérence et performances, 100 exécutions
+
+**Chargement réel :** Redis **1 650 clés** (dont 1 500 présences), Neo4j **5 000 utilisateurs**, **150 serveurs**, **15 000 relations d'amitié** et **7 984 appartenances**.
+
+**Preuves de correction :** présences actives PostgreSQL/Redis **1 500/1 500** au contrôle ; résultats identiques pour le comptage en ligne des serveurs 118 (**159**), 80 (**7**), 52 (**1**) et 1 (**5**) ; recommandations B3 et B3 bis comparées sur **19 utilisateurs**, mêmes listes et scores. Le test Redis d'une clé `EX 2` a confirmé sa disparition après **2,4 s**. Les présences opérationnelles utilisent un TTL de **300 s** ; leur extinction après 300 s n'a pas été attendue dans cette expérience.
+
+| Cas | Moteur | p50 (ms) | p95 (ms) |
+|---|---|---:|---:|
+| B2a présence : écriture | PostgreSQL | 0.42 | 0.63 |
+| B2a présence : écriture | Redis | 0.21 | 0.30 |
+| B2b présence : en ligne dans un serveur (478 membres) | PostgreSQL | 0.26 | 0.28 |
+| B2b présence : en ligne dans un serveur (478 membres) | Redis | 2.31 | 2.54 |
+| B3 serveurs suggérés (amis) | PostgreSQL | 0.24 | 0.29 |
+| B3 serveurs suggérés (amis) | Neo4j | 1.25 | 1.64 |
+| B3 bis amis d'amis (n=30) | PostgreSQL | 0.22 | 0.26 |
+| B3 bis amis d'amis (n=30) | Neo4j | 1.20 | 1.38 |
+
+**Interprétation :** Redis gagne pour l'écriture d'une présence (**p50 0,21 ms** contre **0,42 ms**), mais perd pour le comptage des personnes en ligne dans un serveur (**2,31 ms** contre **0,26 ms**). Neo4j est plus lent que SQL sur les deux recommandations testées : B3 **1,25 ms** contre **0,24 ms** et B3 bis **1,20 ms** contre **0,22 ms** en p50. Ces résultats sont liés aux requêtes, aux index et à la faible taille du graphe : pas de classement universel des moteurs.
+
+**Pourquoi vérifier l'égalité avant de mesurer ?** Une solution qui rend une liste incomplète ou incorrecte peut sembler plus rapide simplement parce qu'elle fait moins de travail : le benchmark ne serait pas pertinent.
+
+**Expiration sans Redis :** PostgreSQL doit stocker `last_seen_at`, filtrer `last_seen_at > now()-interval '5 minutes'` à la lecture et planifier une purge si l'on veut supprimer physiquement les lignes obsolètes. Avec Redis, la clé expire nativement.
+
+## Mesure 8 — Benchmark final complet, 300 exécutions
+
+Commande : `python bench.py --n 300` (rechargement Redis/Neo4j avant lancement). Les chiffres ci-dessous sont **issus de la sortie Terminal du 13 novembre 2026** ; ils ne sont pas simulés. L'outil a exécuté 10 appels d'échauffement par cas avant de chronométrer. B3 bis est le seul sous-test avec **30 entrées** au lieu de 300, comme l'indique le script.
+
+| Cas | Moteur | p50 (ms) | p95 (ms) |
+|---|---|---:|---:|
+| B1 50 derniers messages, salon chaud | PostgreSQL | 0.14 | 0.16 |
+| B1 50 derniers messages, salon chaud | MongoDB | 0.23 | 0.33 |
+| B1 50 derniers messages, salon chaud | Cassandra | 0.45 | 0.54 |
+| B1 50 derniers messages, salon chaud | Cassandra + fenetres non vides (bonus) | 0.85 | 1.35 |
+| B1 50 derniers messages, salon moyen | PostgreSQL | 0.13 | 0.14 |
+| B1 50 derniers messages, salon moyen | MongoDB | 0.22 | 0.24 |
+| B1 50 derniers messages, salon moyen | Cassandra | 5.58 | 9.25 |
+| B1 50 derniers messages, salon moyen | Cassandra + fenetres non vides (bonus) | 7.33 | 9.31 |
+| B1 50 derniers messages, salon clairsemé | PostgreSQL | 0.14 | 0.16 |
+| B1 50 derniers messages, salon clairsemé | MongoDB | 0.20 | 0.22 |
+| B1 50 derniers messages, salon clairsemé | Cassandra | 8.29 | 11.97 |
+| B1 50 derniers messages, salon clairsemé | Cassandra + fenetres non vides (bonus) | 0.85 | 1.09 |
+| B2a présence : écriture | PostgreSQL | 0.26 | 0.55 |
+| B2a présence : écriture | Redis | 0.13 | 0.16 |
+| B2b présence : en ligne dans un serveur (478 membres) | PostgreSQL | 0.21 | 0.23 |
+| B2b présence : en ligne dans un serveur (478 membres) | Redis | 1.13 | 1.33 |
+| B3 serveurs suggérés (amis) | PostgreSQL | 0.14 | 0.16 |
+| B3 serveurs suggérés (amis) | Neo4j | 0.97 | 1.82 |
+| B3 bis amis d'amis (n=30) | PostgreSQL | 0.31 | 0.86 |
+| B3 bis amis d'amis (n=30) | Neo4j | 0.92 | 1.14 |
+| B4 activité d'un serveur (30 j) | PostgreSQL normalisé | 3.11 | 3.98 |
+| B4 activité d'un serveur (30 j) | PostgreSQL vue matérialisée | 0.15 | 0.19 |
+| B4 activité d'un serveur (30 j) | MongoDB (aggregate) | 1.77 | 2.41 |
+
+**Contrôles de correction :** B1 retourne les mêmes 50/50/1 IDs pour PostgreSQL, MongoDB et Cassandra ; B2b donne les mêmes comptes PostgreSQL/Redis ; B3 et B3 bis donnent les mêmes recommandations et scores ; B4 **31 jours**, **1 928 messages**, et résultats identiques entre PostgreSQL normalisé, vue matérialisée et MongoDB. L'égalité a été vérifiée **avant les chronométrages**.
+
+**Bilan par besoin.** PostgreSQL conserve l'avantage sur B1 ; Redis gagne sur B2a et perd sur B2b ; PostgreSQL gagne sur les suggestions B3/B3 bis ; la vue matérialisée PostgreSQL de B4 (**p50 0,15 ms**) est environ **20,7 fois** plus rapide que la version SQL normalisée (**3,11 ms**), au prix du rafraîchissement et du risque de données périmées. MongoDB agrégé (1,77 ms) se situe entre les deux. Cassandra passe de 8,29 à 0,85 ms en p50 sur le salon clairsemé avec la liste de fenêtres non vides, mais reste moins rapide que PostgreSQL (0,14 ms) ici.
+
+### Méthodologie et limites
+
+- **Pourquoi le p95 ?** Il mesure la latence sous laquelle passent 95 % des observations et révèle mieux les requêtes lentes qu'une seule moyenne ; la moyenne masque les pics. Ici, 300 tests séquentiels ne constituent pas une charge concurrente.
+- **Pourquoi échauffer ?** Les premières requêtes peuvent inclure initialisation des connexions, chargement de pages en mémoire et caches froids. Le benchmark teste ensuite un régime relativement chaud ; il faut aussi tester le froid avant de conclure pour la production.
+- **Limite 1 — Échelle :** seulement 300 000 messages et 5 000 utilisateurs, très loin des milliards de messages et des partitions extrêmement chaudes de Discord. L'ordre des performances peut changer avec une RAM saturée.
+- **Limite 2 — Concurrence :** requêtes appelées en séquence, sans vrais pics multi-utilisateurs, ni mesure de débit soutenu, de contention, de p99 sous charge ou de panne réplique.
+- **Limite 3 — Réseau et plateforme :** cinq moteurs sur Docker Desktop, un seul Mac (M5, 16 Go), accès localhost et caches en mémoire ; pas de latence réseau distribuée, ni comparaison à ressources isolées identiques. B3 bis utilise 30 entrées et non 300.
+
+**Portée du verdict :** ces chiffres établissent ce qui gagne **sur ce protocole local et ce jeu de données**, pas ce qui serait le plus rapide dans un cluster de production.
+
+### Tombstones (Mission 4) — preuve complémentaire
+
+- Lecture initiale : **50 messages / 2 ms** ; après **119 999 DELETE** dans une partition, échec `READ_TOO_MANY_TOMBSTONES` après **79 ms** (ce temps est un délai **d'échec**, pas une latence de lecture réussie).
+- Suppression complète de la partition fictive : lecture de **0 message / 12 ms**, sans erreur.
+- Second scénario avec purge locale contrôlée : un message conservé après `flush` + `compact` ; `gc_grace_seconds` temporairement 0 puis restauré à **864 000**. Procédure strictement de laboratoire, jamais une recommandation de production sans examen des répliques.
+
+**Fichiers de preuve disponibles côté poste utilisateur :** `mission2_resultats.txt`, `mission3_chargement.txt`, `mission3_bench.txt`, `mission4_incident.txt`, `mission4_reparation.txt`, `mission4_incident_purge.txt`, `mission4_logs.txt`, `mission5_chargement.txt`, `mission5_bench.txt`, `mission6_bench.txt`.
