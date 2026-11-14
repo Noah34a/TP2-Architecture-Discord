@@ -1,5 +1,15 @@
 # TP2 Discord - Tombstones Cassandra (Mission 4)
 
+### Fiche rapide si une lecture de salon plante
+
+1. Je récupère le salon, le `bucket` et le message d'erreur exact.
+2. Je cherche `READ_TOO_MANY_TOMBSTONES` dans les logs Cassandra, puis je regarde les suppressions et les stats de la table.
+3. Je vérifie quels messages doivent encore exister. Je ne supprime **pas** toute la partition si elle contient des données à garder.
+4. Pour une vraie base, je prépare un correctif adapté avec les répliques, les sauvegardes et la réparation du cluster. Je ne mets **pas** `gc_grace_seconds` à 0 directement.
+5. Après correction, je vérifie que la lecture marche **et** renvoie les messages attendus. Je surveille les nouvelles erreurs et le p95.
+
+Les deux méthodes que j'ai testées plus bas sont des **tests locaux**, pas deux commandes à lancer au hasard en production.
+
 ## 1. Le but du test
 
 Dans cette mission, je devais montrer ce qui se passe quand on supprime énormément de messages dans Cassandra. Pour ne pas toucher aux vrais messages du TP, j'ai utilisé une partition de test avec `salon_id = -1` et `bucket = 0`.
@@ -27,6 +37,8 @@ Les **79 ms** sont le temps avant l'erreur, pas le temps d'une lecture réussie.
 ### Pourquoi ça bloque ?
 
 Dans Cassandra, supprimer un message ne l'efface pas forcément tout de suite du disque. Il reste un marqueur de suppression appelé **tombstone**. Quand il y en a trop, Cassandra doit en parcourir énormément pour retrouver les messages encore présents, et la requête peut échouer.
+
+Le script insère des messages numérotés de **1 à 120 000**, puis supprime ceux de **2 à 120 000**. Il reste donc le numéro **1**, qui est le plus ancien. Comme Cassandra lit les identifiants du plus récent au plus ancien, il tombe d'abord sur tous les messages supprimés avant d'arriver au seul qui reste. Il doit donc traverser énormément de tombstones. Le moteur finit par refuser la lecture quand le seuil de sécurité est dépassé, pour éviter qu'une requête utilise trop de ressources et ralentisse les autres.
 
 Dans les logs du deuxième essai, j'ai retrouvé ces messages :
 
@@ -84,6 +96,12 @@ Le résultat était bien **864000 secondes**.
 - Ne pas écrire des champs `NULL` dans Cassandra si le champ est absent ; utiliser `UNSET_VALUE` dans le script.
 - Surveiller les erreurs, le nombre de tombstones et les temps de réponse.
 - Ne jamais supprimer une partition entière si elle contient encore des messages à garder.
+
+### L'alerte que je mettrais sur un vrai serveur
+
+Je voudrais être prévenu dès qu'une requête renvoie `READ_TOO_MANY_TOMBSTONES`, même une seule fois. Je surveillerais aussi les avertissements de tombstones dans les logs et la **latence p95** des lectures par salon. Par exemple, si elle dépasse régulièrement l'objectif de **80 ms** qu'on avait fixé au TP1, je chercherais le problème avant que les lecteurs soient bloqués. Ce sont des **alertes que je propose**, pas des alertes que j'ai vraiment installées pendant le TP.
+
+En cas d'incident, je commencerais par identifier la partition touchée et regarder les logs. Je ne lancerais pas directement une purge : je vérifierais d'abord s'il reste des messages à conserver et, sur un vrai cluster, l'état des répliques et des réparations. C'est justement pour ça que mes deux tests de correction ne sont pas interchangeables.
 
 ## 6. Comment je vérifie que c'est réparé
 

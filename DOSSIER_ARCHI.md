@@ -87,6 +87,8 @@ Au TP1, j'avais pensé à garder les derniers messages en cache et à calculer l
 
 Je n'ai pas testé de cache Redis pour les 50 messages. Je ne peux donc pas dire qu'il serait plus rapide dans ce cas.
 
+Pour le compteur, j'ai choisi d'ajouter ou enlever 1 avec un trigger plutôt que de recompter tous les membres après chaque changement. Un changement de serveur enlève 1 d'un côté et ajoute 1 de l'autre. Pour la vue, je proposerais un rafraîchissement chaque nuit avec `REFRESH MATERIALIZED VIEW CONCURRENTLY`, mais je n'ai pas mis en place de tâche automatique pendant le TP. Entre deux rafraîchissements, les statistiques peuvent être en retard.
+
 ## 3. Où stocker les messages ?
 
 ### 3.a et 3.b. Les différentes bases
@@ -108,6 +110,8 @@ Pour un salon imaginaire qui reçoit **10 millions de messages par an** (300 oct
 J'avais préféré la **période de 10 jours** : ça évite une énorme partition, sans créer autant de petites partitions qu'un découpage par jour. Par contre, dans un salon peu actif, le programme peut chercher dans beaucoup de périodes vides.
 
 C'est ce que j'ai vu au TP2 : pour le salon clairsemé, Cassandra a parcouru **26 périodes** avec la méthode simple, contre **1** avec une table qui connaît les périodes non vides. Ça confirme le problème des fenêtres vides, mais ça ne prouve pas le calcul de 82 Mo à très grande échelle.
+
+L'optimisation n'a pas aidé tous les salons. Sur le salon moyen, elle a demandé **14 fenêtres au lieu de 16**, mais elle était quand même plus lente (**8,20 ms contre 6,07 ms en p50**). En fait, il faut aussi lire la liste des fenêtres non vides et la tenir à jour. Ça vaut le coup surtout si on évite vraiment beaucoup de recherches inutiles.
 
 ### 3.d. Les problèmes possibles
 

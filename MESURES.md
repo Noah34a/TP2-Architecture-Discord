@@ -47,6 +47,12 @@ Pour les tests, j'ai pris trois salons différents : un très actif, un moyen et
 
 Les salons ne sont pas tous aussi actifs. Par exemple, les 10 plus gros regroupent **22,7 % des messages**. C'est intéressant parce qu'on peut voir comment les bases réagissent suivant le nombre de messages.
 
+### Pourquoi ces trois salons ?
+
+J'ai pris le salon **chaud** pour représenter un gros serveur public où beaucoup de messages arrivent. Le salon **moyen** ressemble plutôt à une petite communauté privée. Le salon **clairsemé** permet de tester le cas d'un serveur surtout vocal, où il y a très peu d'historique écrit. Ce sont des exemples pour mes tests : je ne peux pas prouver le type réel de chaque serveur juste avec le nombre de messages.
+
+On retrouve donc bien les trois comportements dans les données, mais **pas la taille du vrai Discord**. J'ai seulement 300 000 messages, répartis sur une durée limitée, sans millions de personnes connectées ni historique sur plusieurs années. Je peux comparer les requêtes sur ce jeu de données, pas dire quel moteur gagnerait sur les vrais serveurs Discord.
+
 ## Mesure 1 - Base PostgreSQL
 
 J'ai d'abord créé les tables avec `sql/01_schema.sql` et chargé les CSV avec `sql/02_chargement.sql`, après avoir préparé les données avec `sql/00_staging.sql`.
@@ -67,6 +73,25 @@ Tout correspond. J'ai aussi vérifié qu'il n'y avait **aucun propriétaire inva
 J'ai lancé `sql/04_tests_mission1.sql` pour essayer d'ajouter des données qui ne devraient pas être acceptées : pseudo déjà utilisé, email incorrect, mauvais rôle, amitié avec soi-même, message dans un salon vocal, mauvaise date et auteur qui n'est pas membre. **Les 8 tests ont été refusés comme prévu**, sans laisser de fausses données dans les tables.
 
 J'ai mis des clés primaires, des clés étrangères, des `CHECK`, des index et des triggers. Par exemple, un trigger vérifie qu'une personne a le droit d'envoyer un message. L'index `(salon_id, id DESC)` sert à récupérer les 50 derniers messages d'un salon.
+
+### Preuves des contraintes : les erreurs que j'ai obtenues
+
+Je ne me suis pas contenté de regarder les tables : j'ai essayé d'insérer des valeurs interdites. Voilà les messages affichés dans le Terminal (je garde seulement la partie utile de l'erreur) :
+
+| Test | Valeur interdite | Erreur retournée |
+|---|---|---|
+| 1 | Pseudo déjà pris | `duplicate key value violates unique constraint "utilisateur_pseudo_key"` |
+| 2 | Email sans `@` | `violates check constraint "ck_utilisateur_email"` |
+| 3 | Salon de type `video` | `violates check constraint "ck_salon_type"` |
+| 4 | Rôle `administrateur` | `violates check constraint "ck_membre_role"` |
+| 5 | Amitié avec soi-même | `violates check constraint "ck_amitie_ordre"` |
+| 6 | Message dans un salon vocal | `Un message ne peut pas etre envoye dans un salon vocal (salon 9)` |
+| 7 | Modification avant l'envoi | `violates check constraint "ck_message_dates"` |
+| 8 | Auteur non membre | `L auteur 1 n est pas membre du serveur 1` |
+
+Les refus viennent de `UNIQUE`, `CHECK` et des triggers. Pour le propriétaire, un contrôle vérifie aussi qu'il est membre avec le rôle `proprietaire`. **Le coût de ces contrôles**, c'est qu'à chaque envoi PostgreSQL doit vérifier le salon et l'appartenance avant d'accepter le message. Mais je préfère faire cette vérification dans la base plutôt que de risquer de laisser un non-membre écrire. Je n'ai pas testé les envois et exclusions simultanés.
+
+Les index ont chacun une raison : `(salon_id, id DESC)` sert aux derniers messages, ceux sur `membre` aux appartenances et ceux sur les deux côtés d'`amitie` aux suggestions. PostgreSQL ne crée pas automatiquement un index pour chaque clé étrangère, donc j'ai ajouté ceux qui servent à mes requêtes.
 
 ## Mesure 2 - Temps des requêtes SQL
 
@@ -135,6 +160,17 @@ J'ai testé un compteur `nb_membres` qui est mis à jour automatiquement par un 
 
 Il passe bien de **478 à 479**, puis revient à **478**. Ça évite de recompter les membres à chaque lecture. En échange, ça ajoute une mise à jour à chaque arrivée ou départ. J'ai aussi contrôlé tous les serveurs : **0 compteur incorrect**.
 
+### Questions sur les deux optimisations
+
+**Pourquoi incrémenter le compteur et pas tout recalculer ?** Si un membre arrive, j'ajoute **1** au compteur. S'il part avec un `DELETE`, j'enlève **1**. Avec un `UPDATE` qui déplace un membre vers un autre serveur, mon trigger enlève 1 à l'ancien serveur et ajoute 1 au nouveau. Si on change juste son rôle, le nombre de membres ne bouge pas. Refaire un `COUNT(*)` après chaque changement serait plus coûteux, surtout pour les gros serveurs. Avec cette autre méthode, un `DELETE` demanderait de recompter le serveur quitté ; un `UPDATE` vers un autre serveur obligerait à recompter les deux. En contrepartie, chaque changement met à jour aussi la ligne du serveur, ce qui peut créer de l'attente si beaucoup de membres arrivent en même temps.
+
+**Et la vue matérialisée ?** Elle garde les statistiques déjà calculées, mais **elle ne se met pas à jour toute seule** après un nouveau message. Pour mon projet, je proposerais qu'une tâche planifiée la rafraîchisse chaque nuit, puisque le TP1 acceptait des statistiques quotidiennes. Cette tâche **n'est pas installée dans le TP**. La commande est `REFRESH MATERIALIZED VIEW CONCURRENTLY app.activite_serveur_jour;`. Avec l'index unique, les lectures habituelles peuvent continuer pendant le rafraîchissement. Par contre, le recalcul utilise des ressources et les chiffres peuvent être anciens jusqu'au prochain passage.
+
+| Optimisation | Ce que je gagne | Ce que ça coûte | Risque et précaution |
+|---|---|---|---|
+| Compteur `nb_membres` | Lire le nombre directement | Une mise à jour en plus quand un membre arrive, part ou change de serveur | Compteur faux : trigger dans la transaction et comparaison régulière avec `COUNT(*)` |
+| Vue matérialisée | Lire les stats sans refaire le calcul | Stockage et temps de rafraîchissement | Chiffres anciens : rafraîchir régulièrement et contrôler le résultat avec la requête SQL normale |
+
 ## Mesure 5 - Charger MongoDB et Cassandra
 
 J'ai utilisé `python load_nosql.py --messages-seulement` pour copier les messages depuis PostgreSQL, puis `python bench.py --mission3 --n 100` pour comparer les résultats.
@@ -149,6 +185,16 @@ J'ai utilisé `python load_nosql.py --messages-seulement` pour copier les messag
 Les **300 000 messages** sont bien dans les trois bases. Pour Cassandra, le script a vérifié **15 965 partitions non vides** en relisant les messages : les données correspondent à PostgreSQL.
 
 Cassandra range les messages avec la clé `(salon_id, bucket)` : un bucket représente une période de 10 jours. Sur le salon clairsemé, le programme naïf a consulté **26 fenêtres**, alors qu'avec une table des fenêtres non vides il n'en consulte qu'**1**. Cette deuxième table demande quand même un peu plus d'entretien.
+
+### Pourquoi j'ai choisi ces champs et ces index
+
+Dans **MongoDB**, chaque document contient l'identifiant du message (`_id`), son salon, son serveur, son auteur, le texte et la date d'envoi. Les champs facultatifs, comme la date de modification et les pièces jointes, sont ajoutés seulement s'ils existent. J'ai gardé les pièces jointes comme données du document, car leur forme peut changer. Ce test ne stocke pas les vrais fichiers binaires.
+
+J'ai créé deux index composés : `(salon_id, _id DESC)` pour chercher les derniers messages d'un salon (**B1**) et `(serveur_id, envoye_le)` pour les statistiques par serveur et par date (**B4**). L'identifiant `_id` est déjà unique, mais l'index avec le salon permet de retrouver plus directement les messages du bon salon.
+
+Dans **Cassandra**, j'ai choisi `(salon_id, bucket)` comme clé de partition et `message_id DESC` pour l'ordre des messages. Le `bucket` est une fenêtre de **10 jours**. Quand un champ facultatif manque, mon script utilise `UNSET_VALUE` au lieu d'écrire `NULL`, pour éviter de créer des tombstones inutilement.
+
+Pour les **300 000 messages**, je n'ai pas utilisé `SELECT COUNT(*)` sur toute Cassandra. Sur une grosse base répartie en partitions, cette requête obligerait à parcourir énormément de données. Mon script a donc compté les insertions réussies, puis relu les **15 965 partitions non vides** pour vérifier que leur contenu correspond aux nombres attendus depuis PostgreSQL. Enfin, les tests **5b** ont comparé les mêmes identifiants, dans le même ordre, sur les trois bases avant de mesurer la vitesse. C'est une façon de tester la nouvelle base sans changer la source de vérité.
 
 ## Mesure 6 - Comparaison des 50 derniers messages (100 tests)
 
@@ -170,6 +216,14 @@ J'ai fait 100 mesures pour chaque base. **p50** veut dire que la moitié des req
 | B1 50 derniers messages, salon clairsemé | Cassandra + fenetres non vides (bonus) | 1.23 | 1.75 |
 
 Sur ces trois salons, **PostgreSQL est le plus rapide**. Cassandra a surtout du mal sur les salons où il faut chercher dans plusieurs périodes. Avec les fenêtres non vides, le salon clairsemé passe de **10,86 ms à 1,23 ms en p50**. Par contre, sur le salon moyen ça devient plus lent : **6,07 ms sans l'optimisation contre 8,20 ms avec**. Donc ajouter une optimisation ne veut pas forcément dire que tout ira plus vite.
+
+### Pourquoi Cassandra réagit différemment selon les salons
+
+PostgreSQL et MongoDB ont des index qui retrouvent directement les derniers messages du salon. Dans Cassandra, il faut d'abord connaître les **fenêtres de 10 jours** où chercher. Pour le salon chaud, **1 fenêtre** suffisait. Pour le moyen, la lecture simple en a parcouru **16** et la version optimisée **14**. Pour le clairsemé, c'était **26** contre **1**. C'est bien le problème que j'avais prévu avec mes calculs du TP1 : quand il y a peu de messages, on remonte parfois très loin dans le temps.
+
+J'ai ajouté une table `fenetres_par_salon` pour savoir quelles périodes contiennent vraiment des messages. Ça évite les fenêtres vides, mais cette liste prend de la place, doit être créée au chargement, puis tenue à jour si de nouveaux messages arrivent. La lecture ajoute aussi une requête pour récupérer cette liste. Sur mon salon **moyen**, l'optimisation a même été moins bonne : **8,20 ms** contre **6,07 ms** en p50. Le gain n'est donc pas automatique.
+
+**Est-ce que MongoDB est mauvais ici ?** Non. Il répond vite à B1 et renvoie les mêmes messages que PostgreSQL. **Est-ce que Cassandra gagne ?** Non plus sur ce petit volume, surtout quand il y a beaucoup de périodes à parcourir. Avec un historique beaucoup plus gros que la RAM, de vrais accès concurrents et plusieurs machines, il faudrait refaire les mesures : nos 300 000 messages ne suffisent pas à juger les performances à l'échelle de Discord.
 
 ## Mesure 7 - Redis et Neo4j (100 tests)
 
@@ -195,6 +249,14 @@ Redis gagne quand on **met à jour une présence** : **0,21 ms** contre **0,42 m
 Neo4j est aussi plus lent pour nos suggestions. Sur un graphe plus compliqué, le résultat pourrait changer, mais ici PostgreSQL fait déjà bien le travail.
 
 Si je n'utilisais pas Redis pour la présence, il faudrait garder une date de dernière activité dans PostgreSQL, filtrer les utilisateurs vus il y a moins de 5 minutes et prévoir un nettoyage des anciennes données.
+
+### Pourquoi je vérifie les résultats avant la vitesse
+
+Avant de comparer les temps, mon script fait des `assert` pour vérifier que PostgreSQL, Redis et Neo4j donnent **les mêmes réponses** sur les cas testés. Sinon, une requête qui oublie des personnes ou des relations pourrait paraître plus rapide simplement parce qu'elle fait moins de travail. Ça ne serait pas une vraie comparaison.
+
+Pour Redis, le script garde une clé `presence:<id>` avec un TTL de 300 secondes et un ensemble de membres par serveur. Pour compter les personnes en ligne, il récupère d'abord ces membres puis lit plusieurs clés avec `MGET`. Dans notre test, cette opération coûte plus cher qu'un comptage SQL bien indexé. Pour Neo4j, les amitiés sont des liens `AMI_DE` et les appartenances des liens `MEMBRE_DE`, ce qui permet de parcourir le graphe. Mais avec seulement 15 000 amitiés, SQL reste plus rapide ici.
+
+Au TP1, j'attendais surtout que Redis soit pratique pour la présence et que PostgreSQL suffise pour les relations. Les tests confirment le premier point **pour l'écriture**, mais Redis ne gagne pas pour le comptage. Je n'avais pas annoncé de comparaison chiffrée avec Neo4j dans mon vrai TP1, donc je ne vais pas faire comme si je l'avais prévue.
 
 ## Mesure 8 - Benchmark final (300 tests)
 
