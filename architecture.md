@@ -1,6 +1,6 @@
-# Architecture mise à jour — TP2 Discord miniature
+# Architecture du TP2 Discord
 
-**Cible minimale après les mesures : deux moteurs, PostgreSQL + Redis.** MongoDB, Cassandra et Neo4j servent ici de moteurs comparatifs dans Docker ; leurs copies de données ne sont **pas** des sources de vérité métier concurrentes.
+Après les tests, je garde **PostgreSQL + Redis** pour ma version simple. PostgreSQL s'occupe des données importantes et Redis des présences qui expirent au bout de 5 minutes.
 
 ```mermaid
 flowchart LR
@@ -14,10 +14,11 @@ flowchart LR
     PG -.->|Migration des liens pour le TP2| N[(Neo4j : test B3)]
 ```
 
-- PostgreSQL est responsable des entités métier et des autorisations. Un envoi vérifie le membre et le salon textuel avant enregistrement.
-- Redis détient seulement la présence courante : clé expirant après **300 secondes** depuis le dernier heartbeat. Un statut perdu à cause d'une panne Redis est temporaire et peut être reconstruit à la prochaine activité.
-- La vue d'activité dans PostgreSQL est **une copie calculée**, à rafraîchir. Les messages PostgreSQL restent la source du calcul.
-- Le cache Redis des 50 derniers messages est **une idée, pas une fonctionnalité benchmarkée ou déployée** dans ce TP. Une éventuelle copie devrait être invalidée après chaque modification/suppression.
-- Aucun transfert automatique par Kafka, CDC ou outbox n'a été réalisé : dans ce TP, les données des moteurs comparatifs ont été chargées par script depuis PostgreSQL. En production, la propagation vers une projection se ferait après commit avec reprise/idempotence et vérification des écarts.
+- **PostgreSQL** garde les comptes, les salons, les membres, les messages, les amitiés et les droits. C'est la base principale.
+- **Redis** garde un statut temporaire avec une clé qui expire après **300 secondes**. Si Redis redémarre, les présences peuvent être perdues, mais les utilisateurs les recréent en revenant.
+- Pour les **statistiques**, j'ai une vue matérialisée dans PostgreSQL. Elle est rapide mais il faut la mettre à jour.
+- **MongoDB, Cassandra et Neo4j** m'ont servi pour les comparaisons du TP. Je n'ai pas besoin de les ajouter à la version simple.
 
-**Pourquoi seulement ces deux moteurs ?** Sur les 300 000 messages étudiés, PostgreSQL sert les 50 derniers rapidement avec un index. Redis simplifie l'expiration de la présence. MongoDB, Cassandra et Neo4j n'ont pas montré un avantage suffisant pour justifier leur exploitation dans cette miniature. Les limitations du benchmark et les seuils de révision figurent dans `DOSSIER_ARCHI.md`.
+Pour le TP2, j'ai copié les données vers ces autres bases avec des scripts Python, pas avec une synchronisation en temps réel. Si je voulais garder plusieurs bases en production, il faudrait prévoir comment les mettre à jour sans perdre de données.
+
+Je n'ai pas activé de cache Redis pour les 50 derniers messages, car je n'ai pas fait de benchmark de ce cache. Les résultats détaillés sont dans `MESURES.md`.

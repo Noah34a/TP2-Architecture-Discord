@@ -1,181 +1,189 @@
-# DOSSIER_ARCHI — Plateforme de discussion miniature (version 2)
+# TP2 Discord - Dossier d'architecture (version 2)
 
-**Bachelor 3 Ynov Montpellier — Conception et architecture des données, 2026-2027**  
-**Documents sources :** « TP1 – Architecture des données Discord.pdf » (7 pages, rendu initial) ; résultats des missions 0 à 6 du TP2 dans `MESURES.md` ; scripts SQL, CQL et Python du projet.
+B3 Ynov Montpellier - Conception et architecture des données
 
-> **Traçabilité importante.** Le PDF réellement remis au TP1 contient les sections 0, 1.a à 1.e, 2.a à 2.c, 3.a à 3.d et 4.a. La section **1.d n'est pas rédigée**, et la page 7 s'arrête au titre **4.b**, sans contenu. Les sections 4.c, 4.d, 4.e et 4.f, notamment les cinq hypothèses falsifiables demandées, **n'apparaissent pas dans ce PDF**. Elles sont précisées ici au Jour 2, sans les présenter comme du texte écrit la veille. Les objectifs du TP1 ne doivent pas être confondus avec des mesures de production.
+Ce dossier reprend mon TP1 et les tests faits au TP2. Le but était de voir si les bases de données que j'avais choisies au début étaient vraiment adaptées à une petite plateforme comme Discord.
 
-## 0. Ce que j'ai retenu de Discord (TP1, page 1)
+**Petite précision :** mon PDF du TP1 fait 7 pages et s'arrête au début du 4.b. Je n'avais pas rédigé les parties 4.c à 4.f, ni les cinq hypothèses chiffrées demandées pour le jour 2. Je les complète ici avec ce que j'avais écrit et les résultats des tests, sans faire comme si je les avais prévues avant.
 
-Discord a dû stocker et relire un volume croissant de messages. MongoDB s'est mis à produire des lectures moins régulières quand le volume augmentait. Discord a ensuite utilisé Cassandra puis ScyllaDB. Trois repères étaient retenus dans mon TP1 : **100 millions de messages par jour**, environ **50 % de lectures et 50 % d'écritures**, et un seuil d'attention de **100 Mo par partition Cassandra**. Ces chiffres décrivent l'historique étudié, pas les mesures de ma miniature.
+## 0. Ce que j'avais retenu de Discord
 
-## 1. Ce que la plateforme doit garantir
+Discord avait de plus en plus de messages à gérer. Ils utilisaient MongoDB au début, puis les lectures sont devenues moins régulières quand il y avait trop de données. Ils sont ensuite passés à Cassandra puis ScyllaDB pour mieux gérer les gros volumes.
 
-### 1.a. Acteurs et données (TP1, page 1)
+Dans mon TP1, j'avais retenu trois chiffres : **100 millions de messages par jour**, environ **50 % de lectures et 50 % d'écritures**, et **100 Mo** comme seuil de surveillance pour les partitions Cassandra. Ce sont des chiffres tirés de l'étude de Discord, pas de mes mesures.
 
-Les acteurs sont les utilisateurs, les modérateurs et les propriétaires de serveur. Les objets sont les utilisateurs, serveurs, salons, messages, pièces jointes, amitiés et présences. Un utilisateur peut rejoindre un serveur et y écrire selon ses droits. Un *serveur* désigne ici une communauté Discord, pas une machine informatique.
+## 1. Les données de ma plateforme
 
-### 1.b. Règles retenues (TP1, pages 1-2)
+### 1.a. Les éléments principaux
 
-| Garantie par la base | Garantie par du code / un trigger | Hors du stockage relationnel durable |
+J'ai des utilisateurs, des serveurs, des salons, des membres, des messages, des pièces jointes, des amitiés et des présences. Un serveur Discord, ici, c'est une communauté. Un utilisateur peut rejoindre un serveur et envoyer des messages suivant ses droits. Il y a trois rôles : **membre, modérateur et propriétaire**.
+
+### 1.b. Les règles importantes
+
+| Directement dans la base | Vérifiées par du code ou un trigger | Autre fonctionnement |
 |---|---|---|
-| Email unique | Vérifier l'appartenance avant d'écrire | Expiration de la présence après 5 min |
-| Nom de salon unique dans un serveur | Interdire les messages dans un salon vocal | Présence éphémère dans Redis |
-| Une amitié enregistrée une seule fois | Vérifier le propriétaire du serveur | Fichiers binaires stockés séparément si nécessaire |
-| Rôle parmi propriétaire, modérateur et membre | Contrôler le droit de supprimer un message | Cache éventuel, sans remplacer la vérité SQL |
+| Email unique | Vérifier qu'on est membre avant d'écrire | Une présence expire après 5 min |
+| Un nom de salon unique par serveur | Interdire un message dans un salon vocal | Les fichiers peuvent être gardés séparément |
+| Une amitié enregistrée une seule fois | Garder un seul propriétaire | Un cache ne remplace pas la vraie base |
+| Seulement les trois rôles prévus | Vérifier le droit de supprimer un message | Redis peut servir pour les états temporaires |
 
-### 1.c. MCD et choix (TP1, page 2)
+### 1.c. Le MCD
 
-Le MCD original lie **utilisateur, appartenance, serveur, salon, message, pièce jointe, amitié et activité par jour** ; il est repris sous forme de diagramme Mermaid dans `mcd.md`. Les choix initiaux étaient : rôle porté par l'appartenance ; propriétaire également membre ; amitié enregistrée une seule fois ; pièce jointe séparée du message ; message conservé comme entité métier.
+J'ai gardé le rôle dans l'**appartenance** entre un utilisateur et un serveur. Un propriétaire est aussi un membre. Les amitiés sont enregistrées une seule fois par paire. Et les pièces jointes sont séparées des messages dans le MCD, car elles n'ont pas toutes la même forme.
 
-### 1.d. Modèle physique réalisé au TP2 — ajout du Jour 2
+Mon schéma est dans `mcd.md`.
 
-Cette partie était vide dans le PDF du TP1. Voici le **schéma effectivement créé et testé** par `sql/01_schema.sql` :
+### 1.d. Ce que j'ai réellement créé en SQL
 
-- `app.utilisateur(id, pseudo, email, cree_le)` : PK et unicité des identifiants, pseudo et email.
-- `app.serveur(id, nom, proprietaire_id, cree_le, nb_membres)` : FK vers un utilisateur, compteur de membres maintenu par trigger depuis la Mission 2.
-- `app.salon(id, serveur_id, nom, type, cree_le)` : FK vers serveur ; nom unique par serveur ; type `texte` ou `vocal`.
-- `app.membre(utilisateur_id, serveur_id, role, rejoint_le)` : clé composée ; rôles limités aux trois valeurs prévues.
-- `app.message(id BIGINT, salon_id, auteur_id, contenu, envoye_le, modifie_le, pieces_jointes JSONB)` : FK, dates cohérentes, contrôle d'appartenance et de type de salon par trigger.
-- `app.amitie(utilisateur_a, utilisateur_b, depuis)` : clé composée et contrainte `a < b`.
-- `app.presence(utilisateur_id, vu_le)` : comparaison PostgreSQL pour les benchmarks, non destinée à être la source métier principale de présence dans l'architecture cible.
+Cette partie était vide dans mon PDF du TP1. Pour le TP2, j'ai créé les tables suivantes avec PostgreSQL :
 
-L'index `(salon_id, id DESC)` répond aux 50 derniers messages par salon ; les index sur les membres et les deux extrémités de l'amitié servent les jointures. Les 8 tests de contraintes de la Mission 1 ont réussi.
+| Table | Ce qu'elle garde |
+|---|---|
+| `app.utilisateur` | Les comptes, pseudos et emails |
+| `app.serveur` | Les serveurs, leur propriétaire et le nombre de membres |
+| `app.salon` | Les salons texte/vocaux et leur serveur |
+| `app.membre` | Qui fait partie de quel serveur, avec quel rôle |
+| `app.message` | Les messages, leur auteur, leur salon, leurs dates et `pieces_jointes JSONB` |
+| `app.amitie` | Les amitiés entre deux utilisateurs |
+| `app.presence` | Une version SQL des présences pour faire les comparaisons |
 
-**Écarts à reconnaître :** le TP1 prévoyait une entité `PIECE_JOINTE` séparée, tandis que le SQL testé stocke un JSONB dans `message`. Le TP1 disait aussi que le propriétaire devait être un membre sans information redondante ; le schéma testé comporte **`serveur.proprietaire_id` et un rôle `proprietaire` dans `membre`**, rendus cohérents par index et triggers. Les règles de concurrence et la gestion des vrais fichiers ne sont pas démontrées par ce TP.
+J'ai ajouté des clés primaires, étrangères, des contraintes `CHECK` et des index. Par exemple, l'index `(salon_id, id DESC)` aide à lire les 50 derniers messages. Les **8 tests d'intégrité** ont marché.
 
-### 1.e. Cinq questions laissées ouvertes (TP1, page 2)
+Il y a deux différences avec mon MCD du TP1 : dans mon SQL, les pièces jointes sont dans un champ JSONB du message et pas dans une table à part. Et le propriétaire existe dans `serveur.proprietaire_id` ainsi que par son rôle dans `membre`. Pour éviter que les deux valeurs se contredisent, j'ai mis des contrôles avec des triggers. C'est moins simple que ce que j'avais dessiné au départ, mais j'ai testé que la règle est respectée.
 
-Plusieurs pièces jointes par message ? Un message peut-il contenir seulement une image ? Que devient le serveur si son propriétaire part ? Les messages supprimés doivent-ils être conservés ? Les suggestions doivent-elles se mettre à jour immédiatement ? Ces réponses pourraient modifier les cardinalités, la politique de suppression et le choix des caches ; elles n'ont pas été données par un client dans ce TP.
+### 1.e. Les questions encore ouvertes
 
-## 2. Accès, objectifs et volume
+J'avais noté cinq questions : peut-on mettre plusieurs pièces jointes dans un message, envoyer seulement une image, quitter un serveur en étant propriétaire, conserver les messages supprimés, et mettre à jour les suggestions immédiatement ? Je n'ai pas de réponse client à ces questions, donc ce sont toujours des points à décider.
 
-### 2.a. Accès prévus au TP1 (page 3)
+## 2. Les accès et les volumes
 
-| Accès | Fréquence supposée | Latence visée | Cohérence |
-|---|---:|---:|---|
-| Envoyer un message | 10/s | 80 ms | Stricte |
-| Lire les 50 derniers messages | 30/s | 80 ms | Stricte |
-| Vérifier les droits | 10/s | 20 ms | Stricte |
-| Voir les membres en ligne | 10/s | 80 ms | Éphémère |
-| Suggérer des serveurs | 3/s | 200 ms | Retard accepté |
-| Calculer les statistiques | 1/jour | Pas urgent | Retard accepté |
-| Supprimer un message | Fréquence non quantifiée (« à la seconde » dans le TP1) | 80 ms | Stricte |
-| Rechercher un message | 1/s | 300 ms | Retard accepté |
+### 2.a. Ce que j'avais prévu au TP1
 
-Ce sont des **objectifs estimés**, pas des charges qui ont été reproduites. Les benchmarks Python du Jour 2 sont séquentiels et mesurent les fonctions locales, pas une API complète à 30 requêtes par seconde.
+| Action | Fréquence estimée | Temps visé |
+|---|---:|---:|
+| Envoyer un message | 10/s | 80 ms |
+| Lire les 50 derniers messages | 30/s | 80 ms |
+| Vérifier les droits | 10/s | 20 ms |
+| Voir qui est en ligne | 10/s | 80 ms |
+| Suggérer des serveurs | 3/s | 200 ms |
+| Calculer les statistiques | 1/jour | Pas urgent |
+| Supprimer un message | « À la seconde » dans mon TP1 | 80 ms |
+| Rechercher un message | 1/s | 300 ms |
 
-### 2.b. Calculs initiaux (TP1, page 3)
+Ces fréquences étaient des **estimations**, pas des tests de charge. Au TP2, j'ai mesuré des requêtes sur mon Mac, mais je n'ai pas simulé 30 personnes qui lisent en même temps chaque seconde.
 
-- 100 000 000 / 86 400 = **environ 1 157 messages/s** ; pic supposé x3 = **environ 3 472 messages/s**.
-- 100 000 000 messages x 300 octets = **30 Go** ; à ce rythme, **10,95 To/an**.
-- 30 Go de données + 4 Go d'index théorique = **34 Go**, supérieur aux **16 Go de RAM supposés** pour l'exemple historique.
-- Avec 12 nœuds de 1 To et trois copies : environ **4 To logiques compressés** (ordre de grandeur, non volume exact utile).
+### 2.b. Les calculs du TP1
 
-### 2.c. Dénormalisations envisagées (TP1, page 4) et mesurées
+Avec **100 millions de messages par jour**, on arrive à environ **1 157 messages par seconde** en moyenne et **3 472/s** avec un pic supposé trois fois plus fort. À **300 octets par message**, ça fait **30 Go/jour**, donc **10,95 To/an** si ça continue au même rythme.
 
-Le TP1 proposait éventuellement un cache des derniers messages, des statistiques calculées chaque jour et des suggestions conservées temporairement, tout en soulignant le risque de données périmées. Au TP2, **seules** deux optimisations relationnelles ont été testées : la vue matérialisée `app.activite_serveur_jour` et le compteur `nb_membres`. La vue a donné **p50 0,15 ms** contre **3,11 ms** pour le SQL normalisé lors du benchmark final B4. Elle nécessite cependant un rafraîchissement. Aucun cache Redis des 50 derniers messages n'a été benchmarké.
+Avec l'index théorique, j'avais calculé **34 Go** pour 100 millions de messages, alors que l'exemple supposait **16 Go de RAM**. C'est pour ça qu'un gros historique peut finir par provoquer plus de lectures sur disque. Le calcul avec 12 nœuds de 1 To et trois copies donnait environ **4 To logiques compressés** ; c'était seulement un ordre de grandeur.
 
-## 3. Choix du stockage des messages
+### 2.c. Les optimisations possibles
 
-### 3.a-3.b. Raisonnement du TP1 (page 4)
+Au TP1, j'avais pensé à garder les derniers messages en cache et à calculer les statistiques une fois par jour. Pendant le TP2, j'ai surtout testé deux choses dans PostgreSQL :
 
-MongoDB peut devenir irrégulier lorsque données et index dépassent la mémoire disponible et que les lectures demandent des pages sur disque. PostgreSQL gère efficacement les relations et les messages de cette miniature. Cassandra est intéressant à grande échelle, mais impose des requêtes adaptées au partitionnement. Redis sert de cache / présence, pas de stockage unique de l'historique.
+- Une **vue matérialisée** pour les statistiques : **0,15 ms en p50** au lieu de **3,11 ms** avec le calcul normal.
+- Un **compteur de membres** maintenu par trigger : il est bien passé de **478 à 479**, puis revenu à **478**.
 
-### 3.c. Partitions Cassandra (TP1, page 5)
+Je n'ai pas testé de cache Redis pour les 50 messages. Je ne peux donc pas dire qu'il serait plus rapide dans ce cas.
 
-Pour un salon hypothétique à **10 millions de messages/an**, avec **300 octets/message** :
+## 3. Où stocker les messages ?
 
-| Option initiale | Clé de partition | Taille calculée |
-|---|---|---:|
-| A | Salon | 3 000 Mo |
-| B | Salon + fenêtre de 10 jours | environ 82 Mo |
-| C | Salon + jour | environ 8,2 Mo |
+### 3.a et 3.b. Les différentes bases
 
-**Préférence exprimée au TP1 : option B**, compromis entre taille des partitions et nombre de fenêtres à lire. Pour un petit salon à 1 000 messages/an, 50 messages peuvent nécessiter environ 2 à 3 fenêtres de dix jours (hypothèse de répartition régulière). Au TP2, le salon clairsemé a nécessité **26 fenêtres** dans la lecture naïve contre **1** en consultant la liste des fenêtres non vides. Les deux situations ne représentent pas le même rythme de publication : la seconde mesure **confirme le risque des fenêtres vides**, mais ne valide pas la taille théorique de 82 Mo à 10 millions de messages.
+PostgreSQL est pratique ici parce que j'ai beaucoup de relations entre les utilisateurs, les serveurs et les messages. MongoDB peut stocker les messages sans problème, mais les lectures peuvent coûter plus cher quand les données ne tiennent plus en mémoire. Cassandra est fait pour mieux répartir de très gros volumes, mais son fonctionnement est plus compliqué. Redis est utile pour des données temporaires, pas pour garder seul tout l'historique.
 
-### 3.d. Risques (TP1, page 5) et test Cassandra
+C'est pour ça que j'étais déjà parti sur **PostgreSQL + Redis** au TP1.
 
-Le TP1 identifiait les `NULL` inutiles, les millions de suppressions, les salons très sollicités et les pauses mémoire de Cassandra. La Mission 4 a réellement reproduit un échec **`READ_TOO_MANY_TOMBSTONES`** après 119 999 suppressions, puis deux stratégies expérimentales dans le `RUNBOOK_tombstones.md`. Le TP n'a pas mesuré les pauses JVM ou la contention d'un cluster Cassandra multi-nœud.
+### 3.c. Le découpage des messages dans Cassandra
 
-## 4. Architecture : passage du TP1 au TP2
+Pour un salon imaginaire qui reçoit **10 millions de messages par an** (300 octets par message), j'avais comparé trois solutions :
 
-### 4.a. Répartition effectivement proposée au TP1 (pages 5-6)
+| Découpage | Taille calculée |
+|---|---:|
+| Tout le salon dans une partition | 3 000 Mo |
+| Une partition par période de 10 jours | Environ 82 Mo |
+| Une partition par jour | Environ 8,2 Mo |
 
-Le choix annoncé au Jour 1 était **PostgreSQL + Redis** : PostgreSQL pour comptes, serveurs, membres, salons, messages, contrôles de droits, amitiés, suggestions et statistiques ; Redis pour une présence qui expire ; fichiers binaires stockés hors des tables SQL. PostgreSQL est la source de vérité **durable** et Redis la source de l'état **éphémère** de présence. Le TP1 prévoyait un calcul nocturne des statistiques et des suggestions calculées en SQL.
+J'avais préféré la **période de 10 jours** : ça évite une énorme partition, sans créer autant de petites partitions qu'un découpage par jour. Par contre, dans un salon peu actif, le programme peut chercher dans beaucoup de périodes vides.
 
-### 4.b. Schéma d'architecture — complété au Jour 2
+C'est ce que j'ai vu au TP2 : pour le salon clairsemé, Cassandra a parcouru **26 périodes** avec la méthode simple, contre **1** avec une table qui connaît les périodes non vides. Ça confirme le problème des fenêtres vides, mais ça ne prouve pas le calcul de 82 Mo à très grande échelle.
 
-Le titre 4.b figure dans le PDF, mais son contenu est vide. Le schéma cible, **nouvellement explicité**, se trouve dans `architecture.md`. Il distingue l'architecture minimale de production (PostgreSQL + Redis) des moteurs uniquement utilisés pour comparer les performances au TP2 (MongoDB, Cassandra, Neo4j).
+### 3.d. Les problèmes possibles
 
-### 4.c. Trois décisions d'architecture — formulées au Jour 2 depuis le choix 4.a
+Dans mon TP1, j'avais parlé des champs `NULL`, des suppressions massives, des salons trop actifs et des pauses mémoire Cassandra.
 
-**Décision 1 — PostgreSQL pour les messages et données métier : maintenue.** L'idée apparaît dès le tableau 4.a du TP1. Les B1 du benchmark final placent PostgreSQL devant MongoDB et Cassandra sur les trois salons : p95 **0,16 ms** (chaud), **0,14 ms** (moyen) et **0,16 ms** (clairsemé). L'index `(salon_id, id DESC)` suffit dans cette expérience locale. Le passage à un stockage distribué n'est pas démontré nécessaire pour 300 000 messages.
+Pour les suppressions, j'ai pu reproduire le problème. Après **119 999 suppressions**, Cassandra a répondu `READ_TOO_MANY_TOMBSTONES`. Le détail est dans `RUNBOOK_tombstones.md`. Je n'ai pas testé les pauses de la JVM ni un vrai cluster avec plusieurs machines.
 
-**Décision 2 — Droits et rôles contrôlés dans PostgreSQL : maintenue, réalisation différente.** Le TP1 voulait vérifier l'appartenance avant l'envoi et un seul propriétaire par serveur. Les tests SQL refusent le non-membre et l'envoi dans un salon vocal. Le schéma réalisé duplique la propriété via `proprietaire_id` et le rôle propriétaire, mais des triggers et des contraintes contrôlent leur concordance. L'exclusion d'un membre pendant un envoi simultané **n'a pas** fait l'objet d'un test concurrent.
+## 4. Mon architecture après les tests
 
-**Décision 3 — Redis pour la présence : maintenue, avec réserve.** Le TP1 demandait une expiration au bout de cinq minutes. Redis a démontré son TTL sur une clé de test à **2 s**, et les écritures de présence B2a sont plus rapides que SQL (**p50 0,13 contre 0,26 ms**). Pour compter les présents dans un serveur, PostgreSQL gagne en revanche (**p50 0,21 contre 1,13 ms**). Redis ne doit pas devenir une source de vérité pour les droits ou les messages ; le cache de messages est **non activé faute de mesure directe**.
+### 4.a. Ce que j'avais choisi au départ
 
-> Ces trois décisions sont une **formalisation du Jour 2** des choix visibles en 4.a du PDF. Elles ne sont **pas présentées comme des ADR rédigés à la section 4.c du TP1**, laquelle n'existe pas dans le fichier remis.
+Dans le tableau 4.a de mon vrai TP1, j'avais déjà choisi **PostgreSQL pour presque tout** (utilisateurs, serveurs, messages, amitiés, droits, statistiques) et **Redis pour les présences en ligne**. Les fichiers joints peuvent être stockés à part, avec leur référence dans PostgreSQL.
 
-### 4.d. Risque de divergence — analyse ajoutée au Jour 2
+### 4.b. Le schéma
 
-Si un message est supprimé de PostgreSQL mais reste dans un éventuel cache Redis, un utilisateur peut voir du contenu supprimé. La réponse envisagée est : cache non activé par défaut ; sinon invalidation fiable après `COMMIT`, TTL court et possibilité de relire PostgreSQL. En cas de besoin de cohérence immédiate, il faut éviter de servir la copie sans vérification. Ce scénario **n'a pas été testé comme panne de cache** au TP2.
+J'ai mis l'architecture dans `architecture.md`. Les messages et données importantes restent dans PostgreSQL. Redis garde les clés de présence qui expirent au bout de **300 secondes**. MongoDB, Cassandra et Neo4j sont seulement des bases utilisées pour les essais de ce TP.
 
-### 4.e. Version minimale avec deux moteurs — précisée au Jour 2
+### 4.c. Mes trois décisions après les mesures
 
-**On conserve PostgreSQL et Redis**, conformément au choix déjà écrit dans le TP1 4.a. PostgreSQL garde les données durables et leurs contraintes ; Redis ne garde que les présences temporaires. La vue matérialisée des statistiques reste dans PostgreSQL. MongoDB, Cassandra et Neo4j ne sont utilisés ici que pour des tests comparatifs ; ils ajoutent de l'exploitation sans gain démontré pour nos requêtes à cette échelle. Un espace de fichiers n'est pas un troisième moteur de base de données.
+**1. Je garde PostgreSQL pour les messages.** Sur les trois salons, il est plus rapide que MongoDB et Cassandra. Par exemple, sur le salon chaud, il est à **0,14 ms en p50**. Avec seulement 300 000 messages, je ne vois pas de raison d'ajouter un moteur plus compliqué. Je réexaminerais le choix si on dépasse régulièrement **80 ms au p95 côté application**, après avoir essayé d'optimiser les requêtes.
 
-### 4.f. Tableau des hypothèses — reformulé après les mesures (traçabilité)
+**2. Je garde les droits dans PostgreSQL.** Le TP2 montre qu'on peut refuser un utilisateur non membre ou un message envoyé dans un salon vocal. Je préfère ça plutôt que d'utiliser uniquement un cache Redis, qui pourrait ne pas être à jour. Je n'ai pas testé le cas où un utilisateur se fait exclure exactement en même temps qu'il écrit.
 
-**Avertissement :** le PDF du TP1 ne contient **aucun tableau 4.f de cinq hypothèses chiffrées**. Les lignes suivantes reformulent **cinq attentes réellement déductibles de ses pages 3 à 6**, avec des valeurs originales quand elles existent. Elles ne doivent pas être présentées comme cinq prédictions quantitatives écrites avant les tests.
+**3. Je garde Redis pour les présences.** Redis est plus rapide pour renouveler un statut : **0,13 ms** contre **0,26 ms** dans le benchmark final. Il fait aussi expirer les clés automatiquement. En revanche, PostgreSQL est plus rapide pour compter les membres en ligne dans notre test. Donc Redis sert surtout à gérer les présences, pas à remplacer toute la base.
 
-| N° | Attente issue du TP1 | Valeur visée ou calculée dans le TP1 | Observation réelle au TP2 | Verdict et mécanisme |
-|---|---|---|---|---|
-| 1 | Afficher vite les 50 derniers messages | **80 ms** de latence visée (p.3), sans percentile précisé | PostgreSQL B1 p95 **0,16 / 0,14 / 0,16 ms** selon le salon | **Soutenu en lecture locale**, indécidable pour l'API sous 30 lectures/s : un index `(salon_id, id DESC)` rend le tri rapide sur la miniature. |
-| 2 | Contrôler les droits rapidement et strictement | **20 ms** visés (p.3) | R2 SQL **0,292 ms** à l'exécution relevée ; tests d'intégrité réussis | **Soutenu sur le scénario testé**, non vérifié en p95 ni sous exclusion concurrente ; recherches indexées et trigger. |
-| 3 | Expiration automatique de la présence Redis | **5 min = 300 s** (p.2) | TTL `EX 2` a expiré après **2,4 s** ; clés opérationnelles configurées `EX 300` | **Mécanisme confirmé**, expiration à exactement 300 s non chronométrée. PostgreSQL exigerait un filtrage sur `last_seen_at` et une purge optionnelle. |
-| 4 | Clé Cassandra `(salon, 10 jours)` pour limiter les partitions | **≈ 82 Mo/partition** dans le scénario théorique 10 M/an (p.5) | 15 965 partitions pour 300 k messages ; salon clairsemé : **26** fenêtres naïves / **1** non vide | **Indécidable sur les 82 Mo à grande échelle** ; coût des fenêtres vides réellement observé. |
-| 5 | Pré-calcul des statistiques pour éviter le recalcul à chaque lecture | **Calcul quotidien**, pas de facteur de vitesse annoncé (p.4 et p.6) | B4 p95 SQL normalisé **3,98 ms** ; vue matérialisée **0,19 ms** | **Gain local confirmé** (p50 environ **20,7×**) ; coût du rafraîchissement et obsolescence non chiffrés sur charge réelle. |
+Ces trois décisions sont expliquées ici au Jour 2 à partir du choix de mon TP1. Elles n'étaient pas rédigées dans une section 4.c du PDF original.
 
-Cette mise au clair répond à l'analyse demandée au TP2 sans inventer de « facteur prédit x2/x3 » absent du rendu initial. Pour une comparaison strictement conforme à la consigne « cinq hypothèses de 4.f d'hier », il aurait fallu disposer d'une section 4.f réellement rédigée et datée **avant** les mesures ; elle manque dans le PDF fourni.
+### 4.d. Le risque principal
 
-## 5. Verdict architectural fondé sur les mesures (Mission 6)
+Si un message est supprimé de PostgreSQL mais reste dans un cache Redis, quelqu'un pourrait quand même le voir. Pour éviter ça, je n'active pas de cache de messages sans test. Si je le fais plus tard, il faudra vider le cache après chaque modification ou suppression, et prévoir une expiration courte.
 
-### Bilan de B1 à B4
+### 4.e. Si je ne peux garder que deux bases
 
-- **Messages B1 :** PostgreSQL est le plus rapide dans les trois salons. Sur le salon clairsemé, Cassandra naïf prend **8,29 ms p50** ; l'optimisation fenêtres non vides réduit à **0,85 ms** mais PostgreSQL reste à **0,14 ms**.
-- **Présence B2a/B2b :** Redis gagne sur l'écriture, mais perd sur le comptage des personnes en ligne dans un serveur. Cela tient aux accès nécessaires au comptage dans le modèle de test Redis.
-- **Suggestions B3/B3 bis :** PostgreSQL p50 **0,14 / 0,31 ms**, Neo4j **0,97 / 0,92 ms**. Aucun avantage Neo4j pour ce petit graphe et ces parcours simples. Cela ne préjuge pas des graphes profonds à grande échelle.
-- **Activité B4 :** la vue matérialisée PostgreSQL p50 **0,15 ms**, SQL normalisé **3,11 ms**, MongoDB agrégé **1,77 ms** ; égalité de résultats vérifiée sur **31 jours / 1 928 messages**.
-- **Incident Cassandra :** après 119 999 suppressions individuelles, `READ_TOO_MANY_TOMBSTONES`. La purge locale et la suppression complète de partition ne sont pas des procédures interchangeables ; voir le runbook.
+Je garde **PostgreSQL et Redis**, comme au TP1. PostgreSQL est la base principale. Redis sert aux présences. La vue matérialisée reste dans PostgreSQL, donc je n'ai pas besoin de MongoDB, Cassandra ou Neo4j pour cette petite version.
 
-### Pourquoi regarder le p95 et échauffer les requêtes ?
+### 4.f. Mes cinq attentes du TP1 comparées aux résultats
 
-Le p95 représente une valeur sous laquelle passent environ 95 % des lectures : il révèle les requêtes lentes que la moyenne peut masquer. Le benchmark a exécuté **10 appels d'échauffement** par cas avant de mesurer, afin de limiter le coût des connexions initiales et des caches froids. Cela signifie aussi que ses résultats sont principalement des **mesures à chaud**.
+Je n'avais pas écrit cinq hypothèses chiffrées dans le PDF du TP1. Je reprends donc cinq idées que j'avais vraiment notées pour les comparer aux tests. Quand je n'ai pas testé exactement la même chose, je le dis.
 
-### Trois limites capables de changer le verdict
+| Ce que je pensais au TP1 | Valeur prévue | Ce que j'ai mesuré | Conclusion |
+|---|---|---|---|
+| Les 50 derniers messages doivent s'afficher vite | Objectif de 80 ms | PostgreSQL : p95 0,16 / 0,14 / 0,16 ms | Ça marche sur mon Mac, pas encore testé avec 30 lectures/s |
+| Les droits doivent être vérifiés rapidement | Objectif de 20 ms | R2 : 0,292 ms sur une exécution | Objectif tenu sur ce test, pas de test avec plusieurs utilisateurs en même temps |
+| La présence doit expirer seule | 300 secondes | Clé Redis de test expirée après 2,4 s avec TTL 2 s | Le TTL fonctionne, mais j'ai pas attendu les 300 s |
+| Les périodes Cassandra évitent les partitions trop grosses | Environ 82 Mo dans mon calcul théorique | 15 965 partitions ; 26 fenêtres naïves / 1 non vide sur le petit salon | Je vois le coût des périodes vides, mais je n'ai pas mesuré la taille théorique à 10 M de messages |
+| Calculer les stats à l'avance évite de tout recalculer | Une fois par jour, pas de gain chiffré prévu | 3,11 ms → 0,15 ms en p50 avec la vue | Gros gain sur ma machine, mais il faut actualiser les données |
 
-1. **Volume :** 300 000 messages et 5 000 utilisateurs, sans saturation mémoire ; un système massif aurait d'autres besoins de partitionnement.
-2. **Concurrence :** requêtes séquentielles, sans 30 lecteurs/s réels, sans écritures simultanées ni pannes de nœuds ; le p95 observé n'est pas le p95 d'une API réelle.
-3. **Réseau et ressources :** les moteurs partagent Docker Desktop sur un Mac, avec accès local et sans cluster multi-nœud représentatif. Le réseau, l'I/O et la réplication pourraient changer le résultat.
+Ce tableau compare les idées présentes dans mon TP1 aux vrais tests du TP2. **Je n'avais pas annoncé les facteurs de gain avant les expériences**, donc je ne vais pas en inventer maintenant.
 
-### Signaux mesurables qui justifieraient une révision
+## 5. Bilan de la Mission 6
 
-| Besoin futur | Signal à tester avant d'ajouter un moteur | Non testé ici |
-|---|---|---|
-| Messages en forte charge | p95 **API** des 50 derniers messages au-delà de l'objectif initial **80 ms**, après indexation et tuning, de manière répétée | Plusieurs millions de messages et forte concurrence |
-| Suggestions complexes | parcours relationnels qui dépassent l'objectif initial **200 ms** sous charge, et meilleure solution démontrée par comparaison équivalente | Graphes profonds et grosses communautés |
-| Recherche texte | recherche qui dépasse l'objectif initial **300 ms**, après index PostgreSQL adapté | Moteur de recherche spécialisé et pertinence |
-| Cache Redis de messages | gain p95 prouvé pour les **mêmes 50 messages**, avec stratégie de cohérence et taux de succès réaliste | Aucune comparaison Redis contre SQL pour B1 |
-| Droit d'écriture | latence API dépassant **20 ms** ou incohérence sous exclusion simultanée | Test concurrent de transaction et verrouillage |
+| Test | Ce que j'ai constaté |
+|---|---|
+| B1, derniers messages | PostgreSQL est le plus rapide sur les trois salons |
+| B2, présences | Redis gagne à l'écriture, PostgreSQL gagne pour le comptage |
+| B3, suggestions | PostgreSQL est plus rapide que Neo4j sur ce petit graphe |
+| B4, statistiques | La vue matérialisée PostgreSQL gagne (0,15 ms en p50) |
+| Cassandra, suppressions | Trop de tombstones peuvent faire échouer une lecture |
 
-**Si le budget ne permet que deux moteurs : PostgreSQL + Redis.** Ce choix **ne change pas** par rapport au tableau 4.a du TP1. PostgreSQL couvre les règles et les données durables ; Redis apporte un TTL natif pour les états temporaires. Les autres moteurs resteraient des candidats à reconsidérer uniquement si de nouvelles mesures sous charge démontrent un besoin.
+### Pourquoi je regarde le p95 ?
 
-## 6. Sources et preuves
+La moyenne ne montre pas bien les requêtes qui sont beaucoup plus lentes que les autres. Le **p95** permet de regarder ce qui se passe pour les 95 % de requêtes les plus rapides, donc de mieux repérer les cas où le temps commence à monter. J'ai aussi fait **10 passages d'échauffement** avant les mesures pour ne pas mélanger les premiers chargements avec les temps habituels.
 
-- TP1 original : `TP1 – Architecture des données Discord.pdf`, 7 pages, notamment p. 3 (objectifs), p. 5 (partitions) et p. 6 (choix des moteurs).
-- Mesures : `MESURES.md` (Mesures 0 à 8) et logs `mission2_resultats.txt`, `mission3_bench.txt`, `mission5_bench.txt`, `mission6_bench.txt`.
-- Code : `sql/01_schema.sql`, `sql/03_requetes.sql`, `sql/04_tests_mission1.sql`, `cql/01_schema.cql`, `bench/load_nosql.py`, `bench/bench.py`.
-- Incident : `RUNBOOK_tombstones.md` et `mission4_*`.
-- Sources Discord étudiées au TP1 : articles techniques Discord *How Discord Stores Billions of Messages* (2017) et *How Discord Stores Trillions of Messages* (2023), via le dossier documentaire fourni au cours.
+### Ce que mes tests ne montrent pas
+
+Il y a trois grosses limites : je n'ai que **300 000 messages**, mes requêtes ne sont pas lancées avec une vraie foule d'utilisateurs en même temps, et tous mes moteurs tournent **sur un seul Mac avec Docker**. Donc je ne peux pas affirmer que PostgreSQL sera toujours le meilleur à l'échelle de Discord.
+
+### Quand est-ce que je changerais d'architecture ?
+
+- Si la lecture des messages dépasse régulièrement **80 ms au p95 côté application**, même après optimisation et avec une vraie charge, je testerais une solution pour de gros volumes.
+- Si les suggestions deviennent trop lentes (objectif du TP1 : **200 ms**) avec un graphe plus complexe, je referais une comparaison avec Neo4j.
+- Si la recherche de messages devient trop lente (objectif : **300 ms**), je testerais d'abord les index PostgreSQL puis éventuellement un moteur de recherche.
+- Pour un cache Redis des messages, je demanderais une vraie preuve de gain **sur les mêmes 50 messages**, et je vérifierais aussi qu'un message supprimé ne reste pas affiché.
+
+## Conclusion
+
+Au départ, j'avais choisi PostgreSQL et Redis. Après les tests, **je garde ce choix**. PostgreSQL suffit pour gérer les messages, les relations et les contrôles dans notre miniature. Redis est utile pour la présence qui expire automatiquement. Les autres bases ont servi à comparer et à comprendre leurs avantages, mais elles ajoutent de la complexité sans gain suffisant ici.
+
+Mes chiffres, y compris les p50 et p95, sont dans `MESURES.md`. Les tests de suppression Cassandra sont dans `RUNBOOK_tombstones.md`. Les schémas sont dans `mcd.md` et `architecture.md`.

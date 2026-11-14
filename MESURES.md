@@ -1,19 +1,21 @@
-# TP2 — MESURES
+# TP2 Discord - Mes mesures
 
-Bachelor 3 Ynov Montpellier — Architecture des données, plateforme miniature de discussion.
+B3 Ynov Montpellier - Conception et architecture des données
 
-**Méthode :** les volumes et les latences ci-dessous proviennent des sorties du Terminal réalisées sur le Mac du TP. Les performances sont celles de ce jeu de données local, pas de Discord en production.
+Dans ce TP, j'ai testé plusieurs bases de données pour voir laquelle répond le mieux aux besoins de notre petit Discord. J'ai utilisé Docker pour faire tourner les bases, puis Python et SQL pour charger les données et faire les tests.
 
-## Machine
+Tous les chiffres qui suivent viennent des tests faits sur mon Mac. Ce ne sont pas les performances du vrai Discord.
 
-- Machine : MacBook Pro — puce **Apple M5**, **10 cœurs** (4 performance + 6 efficacité), **16 Go RAM**.
-- Système : **macOS 26.6.2** (build 25G83).
-- Docker Desktop / Docker Compose : **PostgreSQL 16, MongoDB 7, Redis 7, Neo4j 5, Cassandra 4.1** (profil `colonne` pour Cassandra).
-- Python : environnement virtuel `.venv`, dépendances de `requirements.txt` installées.
+## Machine utilisée
 
-## Mesure 0 — État des lieux des données
+- MacBook Pro avec une puce **Apple M5 (10 cœurs)** et **16 Go de RAM**.
+- **macOS 26.6.2** (build 25G83).
+- Docker Desktop avec **PostgreSQL 16, MongoDB 7, Cassandra 4.1, Redis 7 et Neo4j 5**.
+- Python avec l'environnement `.venv` et les librairies de `requirements.txt`.
 
-Données générées localement avec `python data/generate_data.py` (graine par défaut 42).
+## Mesure 0 - Les données de départ
+
+J'ai lancé `python data/generate_data.py` pour générer les fichiers CSV (graine 42). Voilà ce que ça donne :
 
 | CSV | Enregistrements (sans l'en-tête) |
 |---|---:|
@@ -25,7 +27,7 @@ Données générées localement avec `python data/generate_data.py` (graine par 
 | `amities.csv` | 15 000 |
 | **Total** | **329 108** |
 
-Répartition des messages, en incluant tous les salons (dont les vocaux, qui n'ont pas de messages textuels) :
+J'ai ensuite regardé comment les messages étaient répartis entre les salons.
 
 | Indicateur | Mesure |
 |---|---:|
@@ -35,7 +37,7 @@ Répartition des messages, en incluant tous les salons (dont les vocaux, qui n'o
 | Part des messages dans les 10 salons les plus actifs | 22,7 % |
 | Salons avec moins de 20 messages | 375 |
 
-Salons textuels retenus pour comparer les performances :
+Pour les tests, j'ai pris trois salons différents : un très actif, un moyen et un qui contient presque aucun message.
 
 | Profil | Salon ID | Serveur ID | Messages |
 |---|---:|---:|---:|
@@ -43,11 +45,13 @@ Salons textuels retenus pour comparer les performances :
 | Moyen | 522 | 80 | 97 |
 | Clairsemé | 342 | 52 | 1 |
 
-**Analyse.** La charge est fortement inégale : les 10 salons les plus actifs totalisent 22,7 % des messages, alors que 375 salons en ont moins de 20. Cela permet de reproduire des profils contrastés (très actif, moyen et peu actif). En revanche, 300 000 messages et une génération locale ne reproduisent ni l'échelle réelle de Discord, ni sa concurrence, ni les conditions réseau et matérielles de production. On ne peut donc pas déduire les performances réelles de Discord de ce benchmark.
+Les salons ne sont pas tous aussi actifs. Par exemple, les 10 plus gros regroupent **22,7 % des messages**. C'est intéressant parce qu'on peut voir comment les bases réagissent suivant le nombre de messages.
 
-## Mesure 1 — Chargement relationnel et contraintes
+## Mesure 1 - Base PostgreSQL
 
-Commandes exécutées : `sql/00_staging.sql`, `sql/01_schema.sql`, `sql/02_chargement.sql` et `sql/04_tests_mission1.sql`.
+J'ai d'abord créé les tables avec `sql/01_schema.sql` et chargé les CSV avec `sql/02_chargement.sql`, après avoir préparé les données avec `sql/00_staging.sql`.
+
+J'ai comparé le nombre de lignes avant et après le chargement :
 
 | Table `app.*` | Lignes `app` | Lignes `staging` | Écart |
 |---|---:|---:|---:|
@@ -58,17 +62,15 @@ Commandes exécutées : `sql/00_staging.sql`, `sql/01_schema.sql`, `sql/02_charg
 | `message` | 300 000 | 300 000 | 0 |
 | `amitie` | 15 000 | 15 000 | 0 |
 
-Invariants : **0** propriétaires invalides, **0** messages dans des salons vocaux, **0** compteurs incorrects après le chargement.
+Tout correspond. J'ai aussi vérifié qu'il n'y avait **aucun propriétaire invalide**, **aucun message dans un salon vocal** et **aucun compteur de membres incorrect**.
 
-Huit violations ont été refusées lors des tests : pseudo en double ; e-mail sans `@` ; type de salon interdit ; rôle interdit ; amitié avec soi-même ; message dans un salon vocal ; date de modification avant l'envoi ; auteur non membre du serveur. Messages observés : contraintes `utilisateur_pseudo_key`, `ck_utilisateur_email`, `ck_salon_type`, `ck_membre_role`, `ck_amitie_ordre`, `ck_message_dates` et exceptions des triggers pour salon vocal et auteur non membre. Tous les tests ont été exécutés sans conserver de données de test.
+J'ai lancé `sql/04_tests_mission1.sql` pour essayer d'ajouter des données qui ne devraient pas être acceptées : pseudo déjà utilisé, email incorrect, mauvais rôle, amitié avec soi-même, message dans un salon vocal, mauvaise date et auteur qui n'est pas membre. **Les 8 tests ont été refusés comme prévu**, sans laisser de fausses données dans les tables.
 
-**Choix de conception.** Les clés primaires, clés étrangères, `UNIQUE` et `CHECK` règlent les contraintes simples. Des triggers empêchent l'envoi de messages dans un salon vocal et par un non-membre. Le contrôle du propriétaire est différé à la fin de la transaction pour permettre l'insertion du serveur avant celle de ses membres. Le coût des triggers est un travail supplémentaire à l'écriture, notamment sur l'envoi de messages ; ils garantissent cependant la cohérence même si plusieurs clients écrivent dans la base.
+J'ai mis des clés primaires, des clés étrangères, des `CHECK`, des index et des triggers. Par exemple, un trigger vérifie qu'une personne a le droit d'envoyer un message. L'index `(salon_id, id DESC)` sert à récupérer les 50 derniers messages d'un salon.
 
-**Index.** `(salon_id, id DESC)` sur les messages sert les 50 derniers messages ; `(serveur_id, utilisateur_id)` sur les membres sert les accès par serveur ; les index des clés étrangères facilitent les jointures et les contrôles ; `(utilisateur_b, utilisateur_a)` complète la clé primaire d'amitié. Le détail se trouve dans les commentaires de `sql/01_schema.sql`.
+## Mesure 2 - Temps des requêtes SQL
 
-## Mesure 2 — Latence des requêtes critiques
-
-Exécution locale de `sql/03_requetes.sql` avec `\timing on` le 13 novembre 2026. Mesures relevées sur le second passage, après correction des lignes `\echo`. Ce sont des temps de requête, non des p50/p95.
+J'ai utilisé `\timing on` dans `sql/03_requetes.sql`. Voici les temps du deuxième passage, le 13 novembre 2026 :
 
 | Requête | Périmètre | Durée relevée (ms) |
 |---|---|---:|
@@ -78,46 +80,52 @@ Exécution locale de `sql/03_requetes.sql` avec `\timing on` le 13 novembre 2026
 | R2 | Droit d'écriture, membre du salon 775 | 0,292 |
 | R3 | Activité par jour, serveur 118, octobre 2026 | 7,831 |
 
-R1 pagine par `id < curseur_id` et non par `OFFSET`. R2 vérifie que le salon est textuel et que l'utilisateur est membre du serveur. R3 compte les messages et les auteurs distincts par jour en UTC.
+- **R1** : afficher les 50 derniers messages, avec une pagination par identifiant plutôt qu'avec `OFFSET`.
+- **R2** : vérifier si une personne est membre et si le salon est textuel.
+- **R3** : compter les messages et les auteurs différents pour chaque jour d'octobre 2026.
 
-## Mesure 3 — Plan d'exécution de R3
+Ce sont des temps pris pendant l'exécution des requêtes, pas encore des p50 ou p95.
 
-Extrait du plan réel, second passage :
+## Mesure 3 - Comprendre pourquoi R3 prend du temps
+
+J'ai lancé `EXPLAIN (ANALYZE, BUFFERS)` sur R3.
 
 ```text
-GroupAggregate (actual time=3.6..3.8 rows=31 loops=1)
-  -> Sort (rows=1928)
-       -> Nested Loop (rows=1928)
-            -> Index Scan using salon_pkey on salon s (rows=4)
-            -> Bitmap Heap Scan on message m (rows=482 loops=4)
-                 Recheck Cond: (salon_id = s.id)
-                 Filter: (envoye_le >= 2026-10-01 AND envoye_le < 2026-11-01)
+GroupAggregate (31 jours)
+  -> Sort (1928 lignes)
+       -> Nested Loop
+            -> Index Scan sur les salons du serveur 118
+            -> Bitmap Heap Scan sur les messages (4 passages)
                  Rows Removed by Filter: 4377
                  Buffers: shared hit=5633
-                 -> Bitmap Index Scan on idx_message_salon_id_desc
+                 -> Bitmap Index Scan sur idx_message_salon_id_desc
 Execution Time: 3.785 ms
 ```
 
-- Le point coûteux dans l'accès aux messages est le **Bitmap Heap Scan** répété quatre fois ; il se trouve sous un **Nested Loop**. Le regroupement et le tri ajoutent aussi du travail.
-- Il s'agit d'un **parcours indexé**, pas d'un parcours séquentiel complet : le moteur sélectionne les salons via l'index et retrouve leurs messages avec `idx_message_salon_id_desc`.
-- Mais cet index ne contient pas `envoye_le` comme colonne de filtre. PostgreSQL doit relire et éliminer les messages hors octobre, d'où `Rows Removed by Filter`. Les temps `EXPLAIN` et `\timing` sont différents car ils ne mesurent pas exactement la même chose.
+Ce qui coûte le plus dans l'accès aux messages, c'est le **Bitmap Heap Scan**. PostgreSQL utilise bien un index, donc il ne lit pas toute la table d'un coup. Mais il doit quand même écarter beaucoup de messages qui ne sont pas en octobre, parce que l'index ne filtre pas directement la date.
 
-## Mesure 4 — Dénormalisations
+## Mesure 4 - Deux optimisations PostgreSQL
 
-### Vue matérialisée `app.activite_serveur_jour`
+### La vue matérialisée
+
+Au lieu de refaire les calculs à chaque fois, j'ai créé une vue qui garde déjà les statistiques par serveur et par jour.
 
 | Version de R3 | Durée relevée (ms) |
 |---|---:|
 | Requête sur tables normalisées | 7,831 |
 | Lecture de la vue matérialisée | 0,136 |
 
-- Vérification observée : `nb_lignes_differentes = 0`. Sur ce second passage, la lecture de la vue a été environ **57,6 fois plus rapide** que la requête normalisée (7,831 / 0,136), sur ce poste uniquement.
-- **Gain attendu en lecture** : lecture de résultats par serveur et jour déjà agrégés, au lieu de calculer `COUNT(DISTINCT)` sur les messages.
-- **Coût payé** : stockage supplémentaire, création et rafraîchissement de la vue (recalcul depuis les messages).
-- **Risque** : données périmées si un message est ajouté, modifié ou supprimé avant le prochain rafraîchissement.
-- **Garde-fou** : planifier un `REFRESH MATERIALIZED VIEW CONCURRENTLY app.activite_serveur_jour;` à une fréquence à définir selon le besoin de fraîcheur, et surveiller la date du dernier rafraîchissement. L'index unique `(serveur_id, jour)` rend le refresh concurrent possible ; des lectures ordinaires continuent pendant le refresh, qui consomme néanmoins des ressources.
+C'est environ **57,6 fois plus rapide** sur cette exécution. J'ai aussi comparé les résultats : **0 ligne différente**. Par contre, il faut penser à actualiser la vue après de nouveaux messages, sinon les chiffres ne sont plus à jour.
 
-### Compteur `app.serveur.nb_membres`
+La commande d'actualisation est :
+
+```sql
+REFRESH MATERIALIZED VIEW CONCURRENTLY app.activite_serveur_jour;
+```
+
+### Le compteur de membres
+
+J'ai testé un compteur `nb_membres` qui est mis à jour automatiquement par un trigger.
 
 | Étape de preuve | Valeur | Résultat attendu |
 |---|---:|---|
@@ -125,15 +133,11 @@ Execution Time: 3.785 ms
 | Après insertion | 479 | Initial + 1 ; `test_ok = t` |
 | Après suppression | 478 | Initial ; `test_ok = t` |
 
-- **Gain en lecture** : `SELECT nb_membres` sans recalculer `COUNT(*)` sur la table des membres.
-- **Coût payé** : une mise à jour du serveur à chaque insertion ou suppression de membre.
-- **Risque** : contention sur la ligne du serveur lors d'inscriptions concurrentes, ou compteur incorrect si des écritures contournent le trigger.
-- **Garde-fou** : trigger atomique dans la même transaction et vérification périodique par comparaison avec un `COUNT(*)` réel (`compteurs_incorrects` doit être **0**).
-- **Choix** : incrémenter/décrémenter évite le coût d'un recomptage de tous les membres ; si l'on déplace un membre par `UPDATE serveur_id`, décrémenter l'ancien serveur et incrémenter le nouveau. Les autres mises à jour ne changent pas le compteur.
+Il passe bien de **478 à 479**, puis revient à **478**. Ça évite de recompter les membres à chaque lecture. En échange, ça ajoute une mise à jour à chaque arrivée ou départ. J'ai aussi contrôlé tous les serveurs : **0 compteur incorrect**.
 
-## Mesure 5 — Migration et égalité des résultats (Mission 3)
+## Mesure 5 - Charger MongoDB et Cassandra
 
-**Protocole :** `python load_nosql.py --messages-seulement` depuis `bench/`, puis `python bench.py --mission3 --n 100`. Les contrôles ne se limitent pas aux accusés d'insertion : les **15 965 partitions Cassandra non vides** ont été relues et comparées à PostgreSQL.
+J'ai utilisé `python load_nosql.py --messages-seulement` pour copier les messages depuis PostgreSQL, puis `python bench.py --mission3 --n 100` pour comparer les résultats.
 
 | Contrôle | PostgreSQL | MongoDB | Cassandra |
 |---|---:|---:|---:|
@@ -142,13 +146,13 @@ Execution Time: 3.785 ms
 | 50 derniers IDs salon moyen 522 (5b) | 50 | 50 identiques | 50 identiques |
 | Derniers IDs salon clairsemé 342 (5b) | 1 | 1 identique | 1 identique |
 
-- Insertion Cassandra : **300 000 INSERT acquittés**, **15 965 partitions non vides**, et **300 000 messages relus** conformes à PostgreSQL.
-- Recherche Cassandra naïve / fenêtres non vides : salon 775 **1/1**, salon 522 **16/14**, salon 342 **26/1**. Le nombre de fenêtres explorées explique la pénalité sur un salon presque vide.
-- MongoDB utilise un index composé sur `(salon_id, _id DESC)` ; Cassandra partitionne par `(salon_id, bucket de 10 jours)` avec tri décroissant de l'identifiant Snowflake. La table supplémentaire de fenêtres non vides est une **dénormalisation** avec coût de maintenance.
+Les **300 000 messages** sont bien dans les trois bases. Pour Cassandra, le script a vérifié **15 965 partitions non vides** en relisant les messages : les données correspondent à PostgreSQL.
 
-## Mesure 6 — B1 : latence p50 / p95, 100 exécutions
+Cassandra range les messages avec la clé `(salon_id, bucket)` : un bucket représente une période de 10 jours. Sur le salon clairsemé, le programme naïf a consulté **26 fenêtres**, alors qu'avec une table des fenêtres non vides il n'en consulte qu'**1**. Cette deuxième table demande quand même un peu plus d'entretien.
 
-Résultats du premier benchmark `python bench.py --mission3 --n 100`, latences **du script Python (client + requête)** sur ce poste :
+## Mesure 6 - Comparaison des 50 derniers messages (100 tests)
+
+J'ai fait 100 mesures pour chaque base. **p50** veut dire que la moitié des requêtes passent en dessous de ce temps ; **p95** indique le temps sous lequel passent 95 % des requêtes.
 
 | Cas | Moteur | p50 (ms) | p95 (ms) |
 |---|---|---:|---:|
@@ -165,13 +169,15 @@ Résultats du premier benchmark `python bench.py --mission3 --n 100`, latences *
 | B1 50 derniers messages, salon clairsemé | Cassandra | 10.86 | 19.07 |
 | B1 50 derniers messages, salon clairsemé | Cassandra + fenetres non vides (bonus) | 1.23 | 1.75 |
 
-**Analyse.** PostgreSQL est le plus rapide dans les trois salons. Dans le salon clairsemé, Cassandra naïf affiche p50 **10,86 ms** contre **1,23 ms** pour l'optimisation. Sur le salon moyen, cette optimisation est au contraire plus lente (**8,20 ms** contre **6,07 ms**) : elle ajoute une lecture de métadonnées qui ne se rentabilise pas systématiquement. Les tests de Mission 4 prouvent en outre le risque des tombstones ; voir `RUNBOOK_tombstones.md`.
+Sur ces trois salons, **PostgreSQL est le plus rapide**. Cassandra a surtout du mal sur les salons où il faut chercher dans plusieurs périodes. Avec les fenêtres non vides, le salon clairsemé passe de **10,86 ms à 1,23 ms en p50**. Par contre, sur le salon moyen ça devient plus lent : **6,07 ms sans l'optimisation contre 8,20 ms avec**. Donc ajouter une optimisation ne veut pas forcément dire que tout ira plus vite.
 
-## Mesure 7 — Redis et Neo4j : cohérence et performances, 100 exécutions
+## Mesure 7 - Redis et Neo4j (100 tests)
 
-**Chargement réel :** Redis **1 650 clés** (dont 1 500 présences), Neo4j **5 000 utilisateurs**, **150 serveurs**, **15 000 relations d'amitié** et **7 984 appartenances**.
+Pour Redis, j'ai chargé **1 500 présences**. Pour Neo4j, j'ai chargé **5 000 utilisateurs, 150 serveurs, 15 000 amitiés et 7 984 appartenances**.
 
-**Preuves de correction :** présences actives PostgreSQL/Redis **1 500/1 500** au contrôle ; résultats identiques pour le comptage en ligne des serveurs 118 (**159**), 80 (**7**), 52 (**1**) et 1 (**5**) ; recommandations B3 et B3 bis comparées sur **19 utilisateurs**, mêmes listes et scores. Le test Redis d'une clé `EX 2` a confirmé sa disparition après **2,4 s**. Les présences opérationnelles utilisent un TTL de **300 s** ; leur extinction après 300 s n'a pas été attendue dans cette expérience.
+Avant les mesures, j'ai vérifié que PostgreSQL et Redis donnaient les mêmes nombres de personnes en ligne sur les serveurs testés (**159, 7, 1 et 5**). J'ai aussi comparé les suggestions PostgreSQL et Neo4j sur **19 utilisateurs** : mêmes listes et mêmes scores.
+
+J'ai testé une présence Redis avec une expiration de 2 secondes. Elle avait bien disparu après **2,4 secondes**. Dans l'application, les présences sont réglées sur **300 secondes**, soit 5 minutes.
 
 | Cas | Moteur | p50 (ms) | p95 (ms) |
 |---|---|---:|---:|
@@ -184,15 +190,15 @@ Résultats du premier benchmark `python bench.py --mission3 --n 100`, latences *
 | B3 bis amis d'amis (n=30) | PostgreSQL | 0.22 | 0.26 |
 | B3 bis amis d'amis (n=30) | Neo4j | 1.20 | 1.38 |
 
-**Interprétation :** Redis gagne pour l'écriture d'une présence (**p50 0,21 ms** contre **0,42 ms**), mais perd pour le comptage des personnes en ligne dans un serveur (**2,31 ms** contre **0,26 ms**). Neo4j est plus lent que SQL sur les deux recommandations testées : B3 **1,25 ms** contre **0,24 ms** et B3 bis **1,20 ms** contre **0,22 ms** en p50. Ces résultats sont liés aux requêtes, aux index et à la faible taille du graphe : pas de classement universel des moteurs.
+Redis gagne quand on **met à jour une présence** : **0,21 ms** contre **0,42 ms** pour PostgreSQL en p50. Par contre, pour **compter les gens en ligne dans un serveur**, PostgreSQL gagne. Redis doit lire plusieurs clés pour faire le comptage.
 
-**Pourquoi vérifier l'égalité avant de mesurer ?** Une solution qui rend une liste incomplète ou incorrecte peut sembler plus rapide simplement parce qu'elle fait moins de travail : le benchmark ne serait pas pertinent.
+Neo4j est aussi plus lent pour nos suggestions. Sur un graphe plus compliqué, le résultat pourrait changer, mais ici PostgreSQL fait déjà bien le travail.
 
-**Expiration sans Redis :** PostgreSQL doit stocker `last_seen_at`, filtrer `last_seen_at > now()-interval '5 minutes'` à la lecture et planifier une purge si l'on veut supprimer physiquement les lignes obsolètes. Avec Redis, la clé expire nativement.
+Si je n'utilisais pas Redis pour la présence, il faudrait garder une date de dernière activité dans PostgreSQL, filtrer les utilisateurs vus il y a moins de 5 minutes et prévoir un nettoyage des anciennes données.
 
-## Mesure 8 — Benchmark final complet, 300 exécutions
+## Mesure 8 - Benchmark final (300 tests)
 
-Commande : `python bench.py --n 300` (rechargement Redis/Neo4j avant lancement). Les chiffres ci-dessous sont **issus de la sortie Terminal du 13 novembre 2026** ; ils ne sont pas simulés. L'outil a exécuté 10 appels d'échauffement par cas avant de chronométrer. B3 bis est le seul sous-test avec **30 entrées** au lieu de 300, comme l'indique le script.
+Pour finir, j'ai relancé toutes les comparaisons avec `python bench.py --n 300`, après avoir rechargé Redis. Le script fait **10 passages d'échauffement** avant les mesures. Le test B3 bis utilise **30 entrées**, comme prévu dans le script, même pendant ce benchmark global.
 
 | Cas | Moteur | p50 (ms) | p95 (ms) |
 |---|---|---:|---:|
@@ -220,24 +226,25 @@ Commande : `python bench.py --n 300` (rechargement Redis/Neo4j avant lancement).
 | B4 activité d'un serveur (30 j) | PostgreSQL vue matérialisée | 0.15 | 0.19 |
 | B4 activité d'un serveur (30 j) | MongoDB (aggregate) | 1.77 | 2.41 |
 
-**Contrôles de correction :** B1 retourne les mêmes 50/50/1 IDs pour PostgreSQL, MongoDB et Cassandra ; B2b donne les mêmes comptes PostgreSQL/Redis ; B3 et B3 bis donnent les mêmes recommandations et scores ; B4 **31 jours**, **1 928 messages**, et résultats identiques entre PostgreSQL normalisé, vue matérialisée et MongoDB. L'égalité a été vérifiée **avant les chronométrages**.
+Avant de chronométrer, le programme vérifie que les résultats correspondent : mêmes identifiants de messages, mêmes présences, mêmes suggestions et mêmes statistiques. Pour B4, les trois méthodes donnent bien **31 jours et 1 928 messages**.
 
-**Bilan par besoin.** PostgreSQL conserve l'avantage sur B1 ; Redis gagne sur B2a et perd sur B2b ; PostgreSQL gagne sur les suggestions B3/B3 bis ; la vue matérialisée PostgreSQL de B4 (**p50 0,15 ms**) est environ **20,7 fois** plus rapide que la version SQL normalisée (**3,11 ms**), au prix du rafraîchissement et du risque de données périmées. MongoDB agrégé (1,77 ms) se situe entre les deux. Cassandra passe de 8,29 à 0,85 ms en p50 sur le salon clairsemé avec la liste de fenêtres non vides, mais reste moins rapide que PostgreSQL (0,14 ms) ici.
+### Ce que j'en retiens
 
-### Méthodologie et limites
+- Pour les **messages (B1)**, PostgreSQL reste le plus rapide sur nos trois salons.
+- Pour la **présence (B2)**, Redis est plus rapide à l'écriture, mais PostgreSQL est plus rapide pour le comptage.
+- Pour les **suggestions (B3)**, PostgreSQL gagne ici face à Neo4j.
+- Pour les **statistiques (B4)**, la vue matérialisée PostgreSQL passe de **3,11 ms à 0,15 ms en p50**, soit environ **20,7 fois plus rapide**. Il faut juste la rafraîchir.
 
-- **Pourquoi le p95 ?** Il mesure la latence sous laquelle passent 95 % des observations et révèle mieux les requêtes lentes qu'une seule moyenne ; la moyenne masque les pics. Ici, 300 tests séquentiels ne constituent pas une charge concurrente.
-- **Pourquoi échauffer ?** Les premières requêtes peuvent inclure initialisation des connexions, chargement de pages en mémoire et caches froids. Le benchmark teste ensuite un régime relativement chaud ; il faut aussi tester le froid avant de conclure pour la production.
-- **Limite 1 — Échelle :** seulement 300 000 messages et 5 000 utilisateurs, très loin des milliards de messages et des partitions extrêmement chaudes de Discord. L'ordre des performances peut changer avec une RAM saturée.
-- **Limite 2 — Concurrence :** requêtes appelées en séquence, sans vrais pics multi-utilisateurs, ni mesure de débit soutenu, de contention, de p99 sous charge ou de panne réplique.
-- **Limite 3 — Réseau et plateforme :** cinq moteurs sur Docker Desktop, un seul Mac (M5, 16 Go), accès localhost et caches en mémoire ; pas de latence réseau distribuée, ni comparaison à ressources isolées identiques. B3 bis utilise 30 entrées et non 300.
+### Pourquoi regarder le p95 et faire un échauffement ?
 
-**Portée du verdict :** ces chiffres établissent ce qui gagne **sur ce protocole local et ce jeu de données**, pas ce qui serait le plus rapide dans un cluster de production.
+Avec seulement une moyenne, on peut rater certaines requêtes lentes. Le p95 permet de mieux les voir. L'échauffement sert à éviter que les tout premiers chargements faussent trop les mesures. Du coup, les temps qu'on a relevés sont surtout des temps avec les caches déjà utilisés.
 
-### Tombstones (Mission 4) — preuve complémentaire
+### Les limites de mes tests
 
-- Lecture initiale : **50 messages / 2 ms** ; après **119 999 DELETE** dans une partition, échec `READ_TOO_MANY_TOMBSTONES` après **79 ms** (ce temps est un délai **d'échec**, pas une latence de lecture réussie).
-- Suppression complète de la partition fictive : lecture de **0 message / 12 ms**, sans erreur.
-- Second scénario avec purge locale contrôlée : un message conservé après `flush` + `compact` ; `gc_grace_seconds` temporairement 0 puis restauré à **864 000**. Procédure strictement de laboratoire, jamais une recommandation de production sans examen des répliques.
+J'ai testé **300 000 messages**, pas des milliards. Les requêtes sont lancées principalement **une par une** et les bases tournent sur **mon Mac avec Docker**. Donc les résultats peuvent être différents si on a des milliers de personnes connectées en même temps, plusieurs serveurs physiques ou un réseau plus lent.
 
-**Fichiers de preuve disponibles côté poste utilisateur :** `mission2_resultats.txt`, `mission3_chargement.txt`, `mission3_bench.txt`, `mission4_incident.txt`, `mission4_reparation.txt`, `mission4_incident_purge.txt`, `mission4_logs.txt`, `mission5_chargement.txt`, `mission5_bench.txt`, `mission6_bench.txt`.
+### Test Cassandra des tombstones (Mission 4)
+
+J'ai aussi testé **119 999 suppressions** de messages dans une partition de test. La lecture a échoué avec `READ_TOO_MANY_TOMBSTONES` après **79 ms**. Ensuite, la suppression de toute la partition a permis de lire **0 message en 12 ms**. J'ai également testé une purge locale qui a permis de retrouver le dernier message, puis remis `gc_grace_seconds` à **864000**. Les détails et les précautions sont dans `RUNBOOK_tombstones.md`.
+
+Mes sorties de Terminal sont gardées dans les fichiers `mission2_resultats.txt`, `mission3_bench.txt`, `mission4_incident.txt`, `mission4_logs.txt`, `mission5_bench.txt` et `mission6_bench.txt`, entre autres.

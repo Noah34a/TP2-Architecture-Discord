@@ -1,71 +1,61 @@
-# TP2 Discord — RUNBOOK : incident de tombstones Cassandra
+# TP2 Discord - Tombstones Cassandra (Mission 4)
 
-## 1. Objectif et périmètre
+## 1. Le but du test
 
-Reproduire un incident de lecture causé par un grand nombre de tombstones dans Cassandra 4.1, diagnostiquer son origine et tester une stratégie alternative. Le test utilise uniquement la partition fictive `(salon_id=-1, bucket=0)` de `discord.messages_par_salon` ; elle est séparée des données métier du TP.
+Dans cette mission, je devais montrer ce qui se passe quand on supprime énormément de messages dans Cassandra. Pour ne pas toucher aux vrais messages du TP, j'ai utilisé une partition de test avec `salon_id = -1` et `bucket = 0`.
 
-Le schéma de la Mission 3 utilise la clé de partition `(salon_id, bucket)` et le clustering `message_id` en ordre décroissant. Le bucket représente une fenêtre de 10 jours dérivée de l'identifiant Snowflake. Cette organisation limite la taille des partitions réelles, mais ne supprime pas à elle seule le risque lié aux suppressions répétées.
+Dans mon schéma Cassandra, les messages sont rangés par salon et par période de 10 jours. Ça limite la taille des partitions, mais ça n'empêche pas tous les problèmes quand on supprime beaucoup de données.
 
-## 2. Symptôme observé
+## 2. Reproduire le problème
 
-Exécution sur le Mac du TP, avec Cassandra 4.1 sous Docker, depuis le dossier `bench/` :
+Depuis le dossier `bench`, j'ai lancé :
 
 ```bash
 python tombstones.py 2>&1 | tee ../mission4_incident.txt
 ```
 
-Résultats **réellement observés** :
+J'ai créé **120 000 messages** dans la partition, puis supprimé **119 999 messages un par un**.
 
-| Étape | Résultat |
+| Moment du test | Résultat |
 |---|---|
-| Insertion de 120 000 messages dans une partition fictive | Réussie |
-| Lecture initiale des 50 derniers messages | 50 messages lus en **2 ms** |
-| Suppression individuelle de 119 999 messages | Exécutée ; il reste un message métier |
-| Nouvelle lecture (`LIMIT 50`) | **Échec** après **79 ms** : `READ_TOO_MANY_TOMBSTONES` |
+| Avant les suppressions | 50 messages lus en **2 ms** |
+| Après les 119 999 suppressions | Échec après **79 ms** |
+| Erreur affichée | `READ_TOO_MANY_TOMBSTONES` |
 
-Le délai de 79 ms est le délai **avant échec**. Ce n'est pas une latence de lecture réussie.
+Les **79 ms** sont le temps avant l'erreur, pas le temps d'une lecture réussie.
 
-## 3. Cause et diagnostic
+### Pourquoi ça bloque ?
 
-Une suppression Cassandra n'efface pas immédiatement les cellules sur disque. Elle inscrit des *tombstones* pour masquer les valeurs supprimées, notamment afin que la suppression puisse se propager aux répliques. Lors de la lecture, Cassandra doit examiner ces marqueurs. La requête portant sur la partition surchargée franchit ici le seuil de sécurité du moteur et échoue avec `READ_TOO_MANY_TOMBSTONES`.
+Dans Cassandra, supprimer un message ne l'efface pas forcément tout de suite du disque. Il reste un marqueur de suppression appelé **tombstone**. Quand il y en a trop, Cassandra doit en parcourir énormément pour retrouver les messages encore présents, et la requête peut échouer.
 
-Pour investiguer un incident similaire :
-
-1. Identifier la requête en échec et sa clé de partition (`salon_id`, `bucket`).
-2. Vérifier les logs Cassandra et la présence du message `READ_TOO_MANY_TOMBSTONES`.
-3. Examiner les métriques de table et le comportement de compaction (par exemple `nodetool tablestats discord.messages_par_salon`).
-4. Vérifier s'il existe une série de suppressions ligne par ligne, des valeurs `NULL` écrites dans Cassandra, des partitions trop volumineuses ou des TTL massivement expirés.
-
-Ces pistes sont des vérifications recommandées ; **seule l'erreur reproduite dans les résultats ci-dessus a été constatée sur ce Mac**.
-
-## 4. Test de suppression par partition
-
-```bash
-python tombstones.py --reparer 2>&1 | tee ../mission4_reparation.txt
-```
-
-Résultats **réellement observés** :
-
-| Étape | Résultat |
-|---|---|
-| Lecture avant suppression | 50 messages en **2 ms** |
-| Suppression de la partition complète `(salon_id=-1, bucket=0)` | Réussie |
-| Lecture après suppression | **0 message en 12 ms**, sans erreur |
-
-La suppression par partition est représentée par un marqueur de suppression de plage/partition au lieu de 119 999 suppressions par ligne. Elle a permis une lecture vide sans erreur dans ce scénario.
-
-**Limite essentielle :** ce test supprime également le dernier message. Il ne rétablit pas les messages ni ne démontre que toutes les tombstones ont disparu des fichiers SSTable. Les deux mesures (50 messages puis 0 message) ne portent pas sur le même contenu et ne prouvent pas un gain de performance à résultat égal.
-
-## 5. Second correctif testé : purge contrôlée des tombstones (environnement local uniquement)
-
-L'incident a été reproduit une deuxième fois pour tester la purge. Les résultats relevés sont : **50 messages en 3 ms** avant suppression, puis échec de lecture **après 53 ms** à la suite de 119 999 suppressions. Les logs Cassandra sauvegardés dans `mission4_logs.txt` confirment le diagnostic :
+Dans les logs du deuxième essai, j'ai retrouvé ces messages :
 
 ```text
 WARN  Read 0 live rows and 100001 tombstone cells ...
 ERROR Scanned over 100001 tombstones during query ... query aborted
 ```
 
-Une purge a ensuite été effectuée **uniquement sur le conteneur Cassandra local du TP**, en mettant temporairement la période de grâce à zéro puis en vidant la memtable et en lançant une compaction :
+Pour diagnostiquer ça, je regarde la requête qui plante, la partition concernée, les logs et les éventuelles suppressions en masse. Je peux aussi utiliser `nodetool tablestats discord.messages_par_salon` pour voir l'état de la table.
+
+## 3. Premier test de correction : supprimer toute la partition
+
+J'ai lancé :
+
+```bash
+python tombstones.py --reparer 2>&1 | tee ../mission4_reparation.txt
+```
+
+| Avant | Après |
+|---|---|
+| 50 messages lus en **2 ms** | **0 message en 12 ms**, sans erreur |
+
+Ça fonctionne pour ce test, mais **ça supprime aussi le dernier message**. Donc ce n'est pas une bonne solution si je dois conserver des messages. Ça ne prouve pas non plus que tous les marqueurs ont déjà disparu du disque.
+
+## 4. Deuxième test : nettoyer les tombstones
+
+J'ai refait l'incident une deuxième fois. Avant les suppressions, je lisais 50 messages en **3 ms**. Après les 119 999 suppressions, la lecture a échoué au bout de **53 ms**.
+
+Sur **mon Cassandra local uniquement**, j'ai ensuite essayé de purger les tombstones :
 
 ```bash
 docker compose --profile colonne exec -T cassandra cqlsh -e "ALTER TABLE discord.messages_par_salon WITH gc_grace_seconds = 0;"
@@ -74,37 +64,35 @@ docker compose --profile colonne exec -T cassandra nodetool compact discord mess
 docker compose --profile colonne exec -T cassandra cqlsh -e "SELECT message_id FROM discord.messages_par_salon WHERE salon_id = -1 AND bucket = 0 LIMIT 50;"
 ```
 
-**Résultat observé :** la requête s'exécute sans erreur et retourne **un seul message, `message_id = 1`**, celui qui n'avait pas été supprimé. Aucune durée de lecture après compaction n'a été relevée ; il ne faut pas en inventer. Ce résultat valide la récupération du message restant après purge pour ce test local.
+Cette fois, Cassandra a répondu **sans erreur** et j'ai retrouvé **le seul message restant (`message_id = 1`)**. Je n'ai pas relevé le temps de cette lecture, donc je ne peux pas le comparer aux autres.
 
-Le paramètre a été remis à sa valeur initiale immédiatement après le test :
+J'ai ensuite remis le réglage de départ :
 
 ```bash
 docker compose --profile colonne exec -T cassandra cqlsh -e "ALTER TABLE discord.messages_par_salon WITH gc_grace_seconds = 864000;"
 docker compose --profile colonne exec -T cassandra cqlsh -e "SELECT gc_grace_seconds FROM system_schema.tables WHERE keyspace_name = 'discord' AND table_name = 'messages_par_salon';"
 ```
 
-**Valeur retournée : `864000` secondes.**
+Le résultat était bien **864000 secondes**.
 
-**Précaution :** ce protocole est une démonstration sur un unique nœud local, pas un runbook de purge pour la production. En présence de répliques déconnectées ou non réparées, réduire `gc_grace_seconds` et compacter peut permettre la réapparition de données supprimées (*zombies*). En production, il faut examiner la topologie, les réparations, les sauvegardes, la rétention et le cycle des SSTables avec l'équipe d'exploitation avant toute purge.
+**Attention :** je n'ai fait ça que pour le TP, sur une seule instance locale. Dans un vrai cluster, mettre `gc_grace_seconds` à 0 et compacter sans vérifier les répliques pourrait faire réapparaître des données supprimées. Il ne faut pas reproduire cette commande en production telle quelle.
 
-## 6. Prévention et remédiation adaptées à une vraie application
+## 5. Ce que je ferais pour éviter le problème
 
-- Conserver les partitions bornées par **salon et fenêtres de dix jours** ; surveiller les salons extrêmement actifs et adapter le découpage si nécessaire.
-- Éviter les campagnes de `DELETE` ligne par ligne. Lorsque tout un bloc de données doit expirer, privilégier une politique de rétention et un découpage compatible avec des suppressions par partition, si les exigences métier le permettent.
-- Écrire `UNSET_VALUE` pour les champs Cassandra absents plutôt qu'un `NULL` qui crée une tombstone.
-- Si des données doivent rester accessibles, ne pas supprimer leur partition. Prévoir une migration/reconstruction contrôlée des messages à conserver avant de changer la stratégie de suppression.
-- Surveiller les tombstones parcourues, le nombre de partitions, la taille des partitions, les erreurs de lecture, les latences p95 et les compactions.
-- Ne pas abaisser ou augmenter les seuils de tombstones pour masquer l'incident. Ne pas lancer de compaction forcée ni modifier `gc_grace_seconds` sans évaluer les répliques, les sauvegardes et l'espace disque : une suppression prématurée des tombstones peut réintroduire des données anciennes.
+- Garder des partitions pas trop grosses en séparant les messages par salon et période.
+- Éviter de supprimer des dizaines de milliers de messages un par un quand une autre méthode est possible.
+- Ne pas écrire des champs `NULL` dans Cassandra si le champ est absent ; utiliser `UNSET_VALUE` dans le script.
+- Surveiller les erreurs, le nombre de tombstones et les temps de réponse.
+- Ne jamais supprimer une partition entière si elle contient encore des messages à garder.
 
-## 7. Vérification après correction
+## 6. Comment je vérifie que c'est réparé
 
-- La requête de lecture ciblée ne doit plus renvoyer `READ_TOO_MANY_TOMBSTONES`.
-- Les résultats doivent correspondre au jeu de données attendu **après** l'opération : zéro message pour le test de suppression de partition, ou messages préservés dans un scénario où ils doivent être conservés.
-- Relancer le contrôle de cohérence entre PostgreSQL, MongoDB et Cassandra sur les **données métier**. Le test fictif de la Mission 4 ne doit pas les modifier.
-- Reporter les mesures obtenues sans confondre délai d'échec, lecture réussie et lecture vide.
+La requête ne doit plus afficher `READ_TOO_MANY_TOMBSTONES`. Je vérifie aussi **ce qu'elle renvoie** : 0 message dans le test où je vide toute la partition, ou bien 1 message dans le test où je garde le dernier.
 
-## 8. Bilan
+Les données normales du TP ne doivent pas avoir changé, car j'ai utilisé une partition fictive.
 
-L'incident est reproduit : après **119 999 suppressions individuelles**, la lecture échoue avec `READ_TOO_MANY_TOMBSTONES`. Le scénario alternatif de suppression d'une partition permet une lecture vide en **12 ms** sans erreur ; le test distinct de purge/compaction a permis de retrouver **le message restant**. Cela illustre un risque propre aux suppressions massives dans Cassandra et l'importance d'un modèle de partitionnement et de rétention pensé en amont.
+## Conclusion
 
-**Fichiers de preuve :** `mission4_incident.txt`, `mission4_reparation.txt`, `mission4_incident_purge.txt`, `mission4_logs.txt` et `bench/tombstones.py`.
+J'ai réussi à reproduire le problème des tombstones, puis à tester deux façons différentes de le résoudre sur la base locale. La première permet de vider complètement une partition ; la deuxième a permis de retrouver le message encore présent. Ce que je retiens, c'est qu'avec Cassandra il faut prévoir les suppressions dès qu'on choisit comment répartir les données.
+
+Preuves : `mission4_incident.txt`, `mission4_reparation.txt`, `mission4_incident_purge.txt`, `mission4_logs.txt` et `bench/tombstones.py`.
